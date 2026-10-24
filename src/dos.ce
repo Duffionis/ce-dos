@@ -115,7 +115,105 @@ funzione servizio_file(f: byte) {
     }
 }
 
-funzione emetti(c: byte) { rischio { putchar(c come intero); } }
+variabile modo_video: byte = 3;
+variabile col: naturale16;
+variabile riga: naturale16;
+variabile schermo_attivo: booleano;
+variabile attributo: byte = 7;
+
+funzione inizializza_dac() {
+    costante cga: [naturale32; 48] = [0, 0, 0, 0, 0, 42, 0, 42, 0, 0, 42, 42, 42, 0, 0, 42, 0, 42, 42, 21, 0, 42, 42, 42, 21, 21, 21, 21, 21, 63, 21, 63, 21, 21, 63, 63, 63, 21, 21, 63, 21, 63, 63, 63, 21, 63, 63, 63];
+    variabile i: dimensione = 0;
+    mentre i < 256 {
+        se i < 16 {
+            dac[i * 3] = cga[i * 3] come byte; dac[i * 3 + 1] = cga[i * 3 + 1] come byte; dac[i * 3 + 2] = cga[i * 3 + 2] come byte;
+        } altrimenti se i < 32 {
+            costante g: naturale32 = (((i - 16) come naturale32) * 63) / 15;
+            dac[i * 3] = g come byte; dac[i * 3 + 1] = g come byte; dac[i * 3 + 2] = g come byte;
+        } altrimenti se i < 248 {
+            costante j: naturale32 = (i - 32) come naturale32;
+            dac[i * 3] = ((((j / 36) % 6) * 63) / 5) come byte;
+            dac[i * 3 + 1] = ((((j / 6) % 6) * 63) / 5) come byte;
+            dac[i * 3 + 2] = (((j % 6) * 63) / 5) come byte;
+        }
+        i += 1;
+    }
+}
+
+funzione cella(c: naturale16, y: naturale16) -> naturale16 { ritorna (y * 80 + c) * 2; }
+
+funzione pulisci_schermo() {
+    variabile i: naturale16 = 0;
+    mentre i < 2000 { scrivi8(47104, i * 2, 32); scrivi8(47104, i * 2 + 1, 7); i += 1; }
+    col = 0; riga = 0;
+}
+
+funzione scorri_su() {
+    variabile i: naturale16 = 0;
+    mentre i < 1920 { scrivi16(47104, i * 2, leggi16(47104, i * 2 + 160)); i += 1; }
+    mentre i < 2000 { scrivi16(47104, i * 2, 1824); i += 1; }
+}
+
+funzione a_capo() {
+    col = 0; riga += 1;
+    se riga >= 25 { scorri_su(); riga = 24; }
+}
+
+funzione emetti(c: byte) {
+    se !schermo_attivo { rischio { putchar(c come intero); } ritorna; }
+    scegli c {
+        caso 13 { col = 0; }
+        caso 10 { a_capo(); }
+        caso 8 { se col > 0 { col -= 1; } }
+        caso 7 { }
+        altrimenti {
+            scrivi8(47104, cella(col, riga), c);
+            scrivi8(47104, cella(col, riga) + 1, attributo);
+            col += 1;
+            se col >= 80 { a_capo(); }
+        }
+    }
+}
+
+funzione mostra_schermo() {
+    variabile y: naturale16 = 0;
+    mentre y < 25 {
+        variabile fine: naturale16 = 80;
+        mentre fine > 0 && leggi8(47104, cella(fine - 1, y)) <= 32 { fine -= 1; }
+        variabile c: naturale16 = 0;
+        mentre c < fine {
+            variabile b: byte = leggi8(47104, cella(c, y));
+            se b < 32 { b = 32; }
+            rischio { putchar(b come intero); }
+            c += 1;
+        }
+        rischio { putchar(10); }
+        y += 1;
+    }
+}
+
+funzione scrivi_ppm(percorso: testo) {
+    costante f: *byte = apri_file(percorso, "wb");
+    se non_valido(f) { ritorna; }
+    rischio { fputc(80, f); fputc(54, f); fputc(10, f); }
+    variabile intest: [byte] = riserva(byte, 16);
+    rischio { libera(intest); }
+    costante t: testo = "320 200\n255\n";
+    variabile k: dimensione = 0;
+    mentre k < t.lunghezza { rischio { fputc(t[k] come intero, f); } k += 1; }
+    variabile i: naturale16 = 0;
+    mentre i < 64000 {
+        costante idx: dimensione = leggi8(40960, i) come dimensione;
+        variabile q: dimensione = 0;
+        mentre q < 3 {
+            costante v: naturale32 = (dac[idx * 3 + q] come naturale32) * 255 / 63;
+            rischio { fputc(v come intero, f); }
+            q += 1;
+        }
+        i += 1;
+    }
+    rischio { fclose(f); }
+}
 
 funzione al() -> byte { ritorna reg8(0); }
 funzione ah() -> byte { ritorna reg8(4); }
@@ -190,8 +288,42 @@ funzione servizio_dos() {
 
 funzione servizio_video() {
     scegli ah() {
+        caso 0 {
+            modo_video = al() & 127;
+            se modo_video == 3 || modo_video == 2 { pulisci_schermo(); }
+            se modo_video == 19 {
+                variabile i: naturale32 = 0;
+                mentre i < 64000 { scrivi8(40960, i come naturale16, 0); i += 1; }
+            }
+        }
+        caso 2 { riga = reg8(6) come naturale16; col = reg8(2) come naturale16; }
+        caso 3 { imposta_reg8(6, riga come byte); imposta_reg8(2, col come byte); r[CX] = 1543; }
+        caso 6 {
+            costante n: naturale16 = reg8(0) come naturale16;
+            variabile y: naturale16 = reg8(5) come naturale16;
+            mentre y <= (reg8(6) come naturale16) {
+                variabile x: naturale16 = reg8(1) come naturale16;
+                mentre x <= (reg8(2) come naturale16) {
+                    se n == 0 || y + n > (reg8(6) come naturale16) {
+                        scrivi8(47104, cella(x, y), 32); scrivi8(47104, cella(x, y) + 1, reg8(7));
+                    } altrimenti {
+                        scrivi16(47104, cella(x, y), leggi16(47104, cella(x, y + n)));
+                    }
+                    x += 1;
+                }
+                y += 1;
+            }
+        }
+        caso 9, 10 {
+            variabile n: naturale16 = 0;
+            mentre n < r[CX] && col + n < 80 {
+                scrivi8(47104, cella(col + n, riga), al());
+                se ah() == 9 { scrivi8(47104, cella(col + n, riga) + 1, reg8(3)); }
+                n += 1;
+            }
+        }
         caso 14 { emetti(al()); }
-        caso 15 { r[AX] = 80 * 256 + 3; imposta_reg8(7, 0); }
+        caso 15 { r[AX] = 80 * 256 + (modo_video come naturale16); imposta_reg8(7, 0); }
         altrimenti { }
     }
 }

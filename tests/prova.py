@@ -20,6 +20,13 @@ r = subprocess.run(["./cedos", "prog/exe.exe"], cwd=RADICE, capture_output=True,
 esito("exe.exe (rilocazione MZ)", r.stdout == "EXE rilocato ok\n" and r.returncode == 5, repr(r.stdout))
 r = subprocess.run(["./cedos", "prog/file.com"], cwd=RADICE, capture_output=True, text=True)
 esito("file.com (crea, scrive, legge, cancella)", r.stdout == "DOS!!" and r.returncode == 0, repr(r.stdout))
+r = subprocess.run(["./cedos", "prog/testo.com", "--schermo"], cwd=RADICE, capture_output=True, text=True)
+righe = r.stdout.split("\n")
+esito("testo.com (schermo 80x25)", len(righe) > 10 and righe[10] == " " * 20 + "Schermo 80x25 in Ce++", repr(righe[10:11]))
+r = subprocess.run(["./cedos", "prog/grafica.com", "--ppm", "/tmp/ce_dos_g.ppm"], cwd=RADICE, capture_output=True, text=True)
+d = open("/tmp/ce_dos_g.ppm", "rb").read(); h = len(b"P6\n320 200\n255\n")
+px = lambda x, y: tuple(d[h + (y * 320 + x) * 3: h + (y * 320 + x) * 3 + 3])
+esito("grafica.com (VGA 13h + palette)", px(1, 0) == (255, 0, 0) and px(2, 5) == (0, 170, 0) and len(d) == h + 192000, str(px(1, 0)))
 if "--conformita" in sys.argv or os.environ.get("CE_CONFORMITA"):
     r = comp("prova86.ce", "prova86"); esito("compilazione prova86", r.returncode == 0, r.stderr[:400])
     r = subprocess.run(["tools/tutti.sh"] + [x for x in sys.argv[1:] if not x.startswith("--")] , cwd=RADICE, capture_output=True, text=True)

@@ -580,11 +580,35 @@ funzione gruppo5() {
     }
 }
 
+// ---------- porte: DAC della VGA e stato di ritraccia ----------
+variabile dac: [byte; 768];
+variabile dac_indice: dimensione;
+variabile dac_fase: dimensione;
+variabile dac_lettura: booleano;
+variabile ritraccia: byte;
+
 funzione porta_in(porta: naturale16, largo: booleano) -> naturale32 {
+    se porta == 986 {   // 3DA: alterna ritraccia e blanking cosi' i cicli di attesa finiscono
+        ritraccia = ritraccia + 1;
+        ritorna ((ritraccia & 3) come naturale32) * 4 + 1;
+    }
+    se porta == 969 {   // 3C9
+        costante v: byte = dac[dac_indice * 3 + dac_fase];
+        dac_fase += 1;
+        se dac_fase == 3 { dac_fase = 0; dac_indice = (dac_indice + 1) & 255; }
+        ritorna v come naturale32;
+    }
     ritorna maschera_di(largo);
 }
 
-funzione porta_out(porta: naturale16, largo: booleano, v: naturale32) { }
+funzione porta_out(porta: naturale16, largo: booleano, v: naturale32) {
+    se porta == 968 || porta == 967 { dac_indice = (v & 255) come dimensione; dac_fase = 0; }
+    se porta == 969 {
+        dac[dac_indice * 3 + dac_fase] = (v & 63) come byte;
+        dac_fase += 1;
+        se dac_fase == 3 { dac_fase = 0; dac_indice = (dac_indice + 1) & 255; }
+    }
+}
 
 // ---------- un'istruzione ----------
 funzione passo() {

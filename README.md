@@ -20,7 +20,12 @@ Stato: tutti gli opcode documentati passano 10.000/10.000 prove, tranne
 DIV/IDIV (F6/F7 /6 /7): gli esiti normali sono giusti, ma sull'errore di divisione i
 flag "indefiniti" spinti sullo stack non imitano il chip. Cicli e coda di prefetch non sono emulati.
 
+## Schermo
+    ./cedos prog/testo.com --schermo        # schermo testo 80x25 (B800:0000), stampato alla fine
+    ./cedos prog/grafica.com --ppm out.ppm  # VGA modo 13h (A000:0000) + palette DAC, salvato come immagine
+La palette predefinita e' un'approssimazione di quella VGA (i primi 16 colori sono quelli veri).
+
 ## Non fatto ancora
-directory e memoria DOS (INT 21h 48h-4Ah), schermo a caratteri e grafica VGA, 286/386.
+directory e memoria DOS (INT 21h 48h-4Ah), finestra in tempo reale (SDL), 286/386, suono.
 
 Nessun BIOS, ROM o chiave e' incluso. Le prove di conformita' si scaricano da SingleStepTests.
