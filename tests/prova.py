@@ -23,6 +23,11 @@ esito("file.com (crea, scrive, legge, cancella)", r.stdout == "DOS!!" and r.retu
 r = subprocess.run(["./cedos", "prog/testo.com", "--schermo"], cwd=RADICE, capture_output=True, text=True)
 righe = r.stdout.split("\n")
 esito("testo.com (schermo 80x25)", len(righe) > 10 and righe[10] == " " * 20 + "Schermo 80x25 in Ce++", repr(righe[10:11]))
+r = subprocess.run(["./cedos", "prog/serpente.com", "--det", "--passi", "3000000", "--copione", "6:80,7:208", "--ppm", "/tmp/ce_dos_s.ppm"], cwd=RADICE, capture_output=True, text=True)
+d = open("/tmp/ce_dos_s.ppm", "rb").read(); h = len(b"P6\n320 200\n255\n")
+cella = lambda x, y: tuple(d[h + ((y * 8 + 4) * 320 + x * 8 + 4) * 3: h + ((y * 8 + 4) * 320 + x * 8 + 4) * 3 + 3])
+verdi = [(x, y) for y in range(25) for x in range(40) if cella(x, y)[1] > 200 and cella(x, y)[0] < 100]
+esito("serpente.com (INT 8 timer + INT 9 tastiera)", cella(20, 12)[0] > 200 and len(verdi) == 3 and len({x for x, y in verdi}) == 1, str(verdi))
 r = subprocess.run(["./cedos", "prog/grafica.com", "--ppm", "/tmp/ce_dos_g.ppm"], cwd=RADICE, capture_output=True, text=True)
 d = open("/tmp/ce_dos_g.ppm", "rb").read(); h = len(b"P6\n320 200\n255\n")
 px = lambda x, y: tuple(d[h + (y * 320 + x) * 3: h + (y * 320 + x) * 3 + 3])

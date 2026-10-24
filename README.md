@@ -25,6 +25,16 @@ flag "indefiniti" spinti sullo stack non imitano il chip. Cicli e coda di prefet
     ./cedos prog/grafica.com --ppm out.ppm  # VGA modo 13h (A000:0000) + palette DAC, salvato come immagine
 La palette predefinita e' un'approssimazione di quella VGA (i primi 16 colori sono quelli veri).
 
+## Interruzioni hardware (come un vero gioco)
+Un "BIOS" minimo sta a F000:0000: ogni vettore parte puntato a uno stub. Il timer (INT 8, ~18,2 Hz dall'orologio vero,
+conta anche in 0040:006C) e la tastiera (INT 9, porta 60h con scancode di pressione e rilascio) sono consegnati ai
+programmi che li agganciano, come su un PC. `prog/serpente.com` (gioco VGA, sorgente `serpente.asm`) li usa:
+
+    ./ce esegui src/finestra.ce -l SDL2 prog/serpente.com      # frecce per muoversi, Esc esce, F12 chiude la finestra
+
+Per le prove automatiche: `--det` (il tempo conta le istruzioni), `--copione "tick:scancode,..."`, `--passi N`, `--ppm file`.
+Dal 386 c'e' solo `0F 80..8F` (salti condizionali near).
+
 ## Interattivo
     ./cedos programma.com --vivo        # terminale: schermo 80x25 che si aggiorna, tastiera in tempo reale (Ctrl-] esce)
     ./ce esegui src/finestra.ce -l SDL2 prog/grafica.com    # finestra SDL2 per la grafica 13h (sul tuo PC, non in un Codespace)

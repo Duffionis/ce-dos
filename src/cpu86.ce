@@ -112,6 +112,8 @@ funzione alu(op: dimensione, a: naturale32, b: naturale32, largo: booleano) -> n
 // ---------- prefetch, registri a 8 bit, modrm ----------
 variabile ovr: dimensione = 4;          // segmento forzato da un prefisso (4 = nessuno)
 variabile ripeti: byte;
+variabile int_ospite: intero = -1;    // F1 nn: servizio dell'ospite chiamato dai stub del "BIOS"
+variabile porta60: byte;
 variabile int_sospesa: intero = -1;   // INT n da servire dopo l'istruzione (l'ospite puo' intercettarla)
 
 funzione servi_int() {
@@ -592,6 +594,7 @@ funzione porta_in(porta: naturale16, largo: booleano) -> naturale32 {
         ritraccia = ritraccia + 1;
         ritorna ((ritraccia & 3) come naturale32) * 4 + 1;
     }
+    se porta == 96 { ritorna porta60 come naturale32; }
     se porta == 969 {   // 3C9
         costante v: byte = dac[dac_indice * 3 + dac_fase];
         dac_fase += 1;
@@ -623,7 +626,7 @@ funzione passo() {
             caso 46 { ovr = CS; ancora = vero; }
             caso 54 { ovr = SS; ancora = vero; }
             caso 62 { ovr = DS; ancora = vero; }
-            caso 240, 241 { ancora = vero; }
+            caso 240 { ancora = vero; }
             caso 242 { ripeti = 1; ancora = vero; }
             caso 243 { ripeti = 2; ancora = vero; }
             altrimenti { }
@@ -656,7 +659,15 @@ funzione passo() {
     scegli opc {
         caso 6, 14, 22, 30 { spingi16(sg[(opc >> 3) come dimensione]); }
         caso 7, 23, 31 { sg[(opc >> 3) come dimensione] = estrai16(); }
-        caso 15 { sg[CS] = estrai16(); }
+        caso 15 {
+            // 8086: POP CS. Qui il byte dopo decide: i salti condizionali "near" del 386 (0F 80..8F) sono ammessi
+            costante b2: byte = preleva8();
+            se b2 >= 128 && b2 <= 143 {
+                costante d: naturale16 = preleva16();
+                se condizione(b2 & 15) { salta_rel(d); }
+            } altrimenti { tratta_errore = 1; }
+        }
+        caso 241 { int_ospite = preleva8() come intero; }
         caso 39, 47 { regola_decimale(opc); }
         caso 55 { regola_ascii(falso); }
         caso 63 { regola_ascii(vero); }

@@ -1,6 +1,6 @@
 // Finestra SDL2 per i programmi grafici (VGA modo 13h) con la tastiera.
 //   ./ce esegui src/finestra.ce -l SDL2 prog/grafica.com [fotogrammi]
-// (il testo si vede nel terminale con: ./cedos programma.com --vivo)
+// (F12 chiude; il testo si vede nel terminale con: ./cedos programma.com --vivo)
 usa "dos.ce";
 usa "@testo.ce";
 usa "@risultato.ce";
@@ -19,6 +19,31 @@ esterna funzione SDL_Delay(ms: naturale32);
 
 variabile pixel: [naturale32; 64000];
 
+// scancode SDL -> scancode XT del PC (set 1); 0 se non gestito
+funzione scancode_pc(sdl: naturale32) -> byte {
+    se sdl >= 4 && sdl <= 29 {   // a..z
+        costante tabella: [byte; 26] = [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44];
+        ritorna tabella[(sdl - 4) come dimensione];
+    }
+    se sdl >= 30 && sdl <= 39 { ritorna (sdl - 28) come byte; }       // 1..9, 0
+    se sdl >= 58 && sdl <= 67 { ritorna (sdl - 19) come byte; }       // F1..F10
+    scegli sdl {
+        caso 40 { ritorna 28; }    // invio
+        caso 41 { ritorna 1; }     // Esc
+        caso 42 { ritorna 14; }    // backspace
+        caso 43 { ritorna 15; }    // tab
+        caso 44 { ritorna 57; }    // spazio
+        caso 79 { ritorna 77; }    // destra
+        caso 80 { ritorna 75; }    // sinistra
+        caso 81 { ritorna 80; }    // giu
+        caso 82 { ritorna 72; }    // su
+        caso 224 { ritorna 29; }   // ctrl
+        caso 225 { ritorna 42; }   // maiusc
+        caso 226 { ritorna 56; }   // alt
+        altrimenti { ritorna 0; }
+    }
+}
+
 funzione principale() -> intero {
     se numero_argomenti() < 2 { stampa("uso: finestra programma.com [fotogrammi]"); ritorna 2; }
     costante lett: Risultato<[byte], testo> = leggi_file(argomento(1));
@@ -30,6 +55,7 @@ funzione principale() -> intero {
         carica_com(d);
     }
     inizializza_dac();
+    inizializza_ivt();
     vivo = vero;
     variabile massimo: naturale64 = 0;
     se numero_argomenti() > 2 {
@@ -57,11 +83,15 @@ funzione principale() -> intero {
                 costante tipo: naturale32 = (evento[0] come naturale32) | ((evento[1] come naturale32) << 8)
                                           | ((evento[2] come naturale32) << 16) | ((evento[3] come naturale32) << 24);
                 se tipo == 256 { attivo = falso; }
-                se tipo == 768 {   // tasto premuto: keysym a 20 byte dall'inizio
+                se tipo == 768 || tipo == 769 {   // tasto giu / su: keysym a 20 byte, scancode a 16
                     costante sym: naturale32 = (evento[20] come naturale32) | ((evento[21] come naturale32) << 8);
-                    se sym == 27 { attivo = falso; }
-                    se sym < 128 && tasto_buf < 0 {
-                        se sym == 13 { tasto_buf = 13; } altrimenti { tasto_buf = sym come intero; }
+                    costante sdl: naturale32 = (evento[16] come naturale32) | ((evento[17] come naturale32) << 8);
+                    se sdl == 69 { attivo = falso; }    // F12 chiude la finestra
+                    costante sc: byte = scancode_pc(sdl);
+                    se sc != 0 {
+                        variabile ascii: byte = 0;
+                        se sym < 128 { ascii = sym come byte; }
+                        evento_tasto(ascii, sc, tipo == 768);
                     }
                 }
             }

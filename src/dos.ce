@@ -9,6 +9,7 @@ esterna funzione getchar() -> intero;
 esterna funzione fflush(f: *byte) -> intero;
 esterna funzione system(c: *byte) -> intero;
 esterna funzione read(fd: intero, buf: *byte, n: dimensione) -> lungo;
+esterna funzione clock() -> lungo;
 esterna funzione usleep(us: naturale32) -> intero;
 esterna funzione fgetc(f: *byte) -> intero;
 esterna funzione fputc(c: intero, f: *byte) -> intero;
@@ -384,11 +385,11 @@ funzione servizio_tastiera() {
         caso 0, 16 {
             costante c: byte = leggi_tasto();
             se manca { rimanda_int(); ritorna; }
-            r[AX] = c come naturale16;
+            r[AX] = c come naturale16 | ((tasto_sc come naturale16) << 8);
         }
         caso 1, 17 {
             se vivo { sonda_tasti(); }
-            se tasto_buf >= 0 { imposta(F_ZF, falso); r[AX] = tasto_buf come naturale16; } altrimenti { imposta(F_ZF, vero); }
+            se tasto_buf >= 0 { imposta(F_ZF, falso); r[AX] = (tasto_buf come naturale16) | ((tasto_sc come naturale16) << 8); } altrimenti { imposta(F_ZF, vero); }
         }
         altrimenti { }
     }
@@ -401,7 +402,11 @@ funzione intercetta(n: byte) -> booleano {
         caso 33 { servizio_dos(); ritorna vero; }
         caso 16 { servizio_video(); ritorna vero; }
         caso 22 { servizio_tastiera(); ritorna vero; }
-        caso 26 { r[CX] = 0; r[DX] = 0; imposta_reg8(0, 0); ritorna vero; }
+        caso 26 {
+            costante t: naturale32 = tick_ora();
+            r[CX] = (t >> 16) come naturale16; r[DX] = (t & 65535) come naturale16; imposta_reg8(0, 0);
+            ritorna vero;
+        }
         altrimenti { ritorna falso; }
     }
 }
@@ -460,15 +465,100 @@ funzione carica_com(d: [byte]) {
     flag = 514;
 }
 
+// ---------- il "BIOS": stub a F000:n*4 e interruzioni hardware ----------
+variabile tasto_sc: byte;               // scancode del tasto in tasto_buf
+variabile coda_sc: [byte; 32];
+variabile coda_n: dimensione;
+variabile tick_consegnato: naturale32;
+variabile deterministico: booleano;
+variabile istruzioni: naturale64;
+variabile copione: [naturale32; 64];    // coppie (tick, scancode) per le prove automatiche
+variabile copione_n: dimensione;
+variabile copione_i: dimensione;
+
+funzione inizializza_ivt() {
+    variabile n: naturale16 = 0;
+    mentre n < 256 {
+        scrivi16(0, n * 4, n * 4);
+        scrivi16(0, n * 4 + 2, 61440);
+        scrivi8(61440, n * 4, 241); scrivi8(61440, n * 4 + 1, n come byte); scrivi8(61440, n * 4 + 2, 207); scrivi8(61440, n * 4 + 3, 144);
+        n += 1;
+    }
+    // IRQ0 chiama INT 1Ch
+    scrivi8(61440, 32, 205); scrivi8(61440, 33, 28); scrivi8(61440, 34, 207);
+}
+
+funzione e_predefinito(n: byte) -> booleano {
+    costante o: naturale16 = (n come naturale16) * 4;
+    ritorna leggi16(0, o) == o && leggi16(0, o + 2) == 61440;
+}
+
+funzione tick_ora() -> naturale32 {
+    se deterministico { ritorna (istruzioni / 100000) come naturale32; }
+    variabile c: lungo = 0;
+    rischio { c = clock(); }
+    ritorna ((c * 182) / 10000000) come naturale32;
+}
+
+funzione invia_scancode(sc: byte) {
+    se coda_n < 32 { coda_sc[coda_n] = sc; coda_n += 1; }
+}
+
+// un tasto dalla tastiera dell'ospite: ascii (0 se esteso), scancode, premuto/rilasciato
+funzione evento_tasto(ascii: byte, sc: byte, premuto: booleano) {
+    se premuto {
+        se tasto_buf < 0 { tasto_buf = ascii come intero; tasto_sc = sc; }
+        invia_scancode(sc);
+    } altrimenti {
+        invia_scancode(sc | 128);
+    }
+}
+
+// consegna le interruzioni hardware se il programma le ha agganciate e IF e' acceso
+funzione consegna_irq() {
+    se !ce(F_IF) { ritorna; }
+    se coda_n > 0 {
+        porta60 = coda_sc[0];
+        variabile i: dimensione = 1;
+        mentre i < coda_n { coda_sc[i - 1] = coda_sc[i]; i += 1; }
+        coda_n -= 1;
+        se !e_predefinito(9) { interruzione(9); ritorna; }
+    }
+    costante t: naturale32 = tick_ora();
+    se t != tick_consegnato {
+        tick_consegnato = t;
+        scrivi16(64, 108, (t & 65535) come naturale16);
+        scrivi16(64, 110, (t >> 16) come naturale16);
+        se !e_predefinito(8) { interruzione(8); }
+    }
+}
+
 funzione esegui(massimo: naturale64) -> naturale64 {
     variabile n: naturale64 = 0;
     attesa = falso;
     mentre !uscita && !fermo && n < massimo && !attesa {
         passo();
+        istruzioni += 1;
         se int_sospesa >= 0 {
             costante v: byte = int_sospesa come byte;
-            se intercetta(v) { int_sospesa = -1; } altrimenti { servi_int(); }
+            se e_predefinito(v) { int_sospesa = -1; intercetta(v); } altrimenti { servi_int(); }
         }
+        se int_ospite >= 0 {
+            costante v: byte = int_ospite come byte;
+            int_ospite = -1;
+            intercetta(v);
+            se !attesa {
+                // ritorno da interruzione che conserva i flag aritmetici del servizio
+                ip = estrai16(); sg[CS] = estrai16();
+                costante vecchi: naturale16 = estrai16();
+                flag = (flag & 2261) | (vecchi & 63274) | 2;
+            }
+        }
+        se copione_i < copione_n && (tick_ora() come naturale32) >= copione[copione_i] {
+            invia_scancode(copione[copione_i + 1] come byte);
+            copione_i += 2;
+        }
+        se (n & 1023) == 0 { consegna_irq(); }
         n += 1;
     }
     ritorna n;
@@ -527,3 +617,21 @@ funzione esegui_vivo() {
 
 funzione comando_raw() -> [byte] { ritorna testo_c("stty -icanon -echo -isig min 0 time 0"); }
 funzione comando_sano() -> [byte] { ritorna testo_c("stty sane"); }
+
+// "5:77,6:205" -> coppie (tick, scancode)
+funzione leggi_copione(t: testo) {
+    variabile i: dimensione = 0;
+    variabile v: naturale32 = 0;
+    variabile primo: booleano = vero;
+    variabile ha: booleano = falso;
+    mentre i <= t.lunghezza {
+        variabile c: byte = 44;
+        se i < t.lunghezza { c = t[i]; }
+        se c >= 48 && c <= 57 { v = v * 10 + ((c - 48) come naturale32); ha = vero; }
+        altrimenti {
+            se ha && copione_n < 62 { copione[copione_n] = v; copione_n += 1; }
+            v = 0; ha = falso;
+        }
+        i += 1;
+    }
+}

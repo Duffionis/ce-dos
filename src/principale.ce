@@ -13,20 +13,29 @@ funzione principale() -> intero {
     } altrimenti {
         carica_com(d);
     }
+    variabile limite: naturale64 = 2000000000;
     variabile ppm: testo = "";
     variabile i: dimensione = 2;
     mentre i < numero_argomenti() {
         costante a: testo = argomento(i);
         se testo_uguale(a, "--schermo") { schermo_attivo = vero; pulisci_schermo(); }
+        altrimenti se testo_uguale(a, "--passi") && i + 1 < numero_argomenti() {
+            costante q: Risultato<lungo, testo> = numero_da_testo(argomento(i + 1));
+            se q.riuscito { limite = q.valore come naturale64; }
+            i += 1;
+        }
+        altrimenti se testo_uguale(a, "--det") { deterministico = vero; }
+        altrimenti se testo_uguale(a, "--copione") && i + 1 < numero_argomenti() { leggi_copione(argomento(i + 1)); i += 1; }
         altrimenti se testo_uguale(a, "--ppm") && i + 1 < numero_argomenti() { ppm = argomento(i + 1); i += 1; }
         i += 1;
     }
     inizializza_dac();
+    inizializza_ivt();
     variabile in_vivo: booleano = falso;
     i = 2;
     mentre i < numero_argomenti() { se testo_uguale(argomento(i), "--vivo") { in_vivo = vero; } i += 1; }
     se in_vivo { pulisci_schermo(); esegui_vivo(); ritorna codice_uscita come intero; }
-    esegui(2000000000);
+    esegui(limite);
     se schermo_attivo && modo_video != 19 { mostra_schermo(); }
     se ppm.lunghezza > 0 { scrivi_ppm(ppm); }
     ritorna codice_uscita come intero;
