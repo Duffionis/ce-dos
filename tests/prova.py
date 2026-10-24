@@ -27,6 +27,33 @@ r = subprocess.run(["./cedos", "prog/grafica.com", "--ppm", "/tmp/ce_dos_g.ppm"]
 d = open("/tmp/ce_dos_g.ppm", "rb").read(); h = len(b"P6\n320 200\n255\n")
 px = lambda x, y: tuple(d[h + (y * 320 + x) * 3: h + (y * 320 + x) * 3 + 3])
 esito("grafica.com (VGA 13h + palette)", px(1, 0) == (255, 0, 0) and px(2, 5) == (0, 170, 0) and len(d) == h + 192000, str(px(1, 0)))
+# tastiera viva: terminale vero (pty), il programma aspetta un tasto
+try:
+    import pty, select, time
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(RADICE); os.execv("./cedos", ["cedos", "prog/tasto.com", "--vivo"])
+    def svuota(t):
+        out, fine = b"", time.time() + t
+        while time.time() < fine:
+            p, _, _ = select.select([fd], [], [], 0.05)
+            if p:
+                try: out += os.read(fd, 65536)
+                except OSError: break
+        return out
+    a = svuota(1.0); os.write(fd, b"k"); b = svuota(1.0)
+    st = os.waitpid(pid, os.WNOHANG)
+    if st[0] == 0: os.kill(pid, 9)
+    esito("tasto.com (--vivo, tastiera)", b"Premi un tasto" in a and b"Hai premuto k" in b and st[0] != 0 and os.WEXITSTATUS(st[1]) == 0)
+except ImportError:
+    print("saltato  tastiera viva (manca pty)")
+import shutil
+if shutil.which("pkg-config") and subprocess.run(["pkg-config", "--exists", "sdl2"]).returncode == 0:
+    r = subprocess.run([CE, "esegui", "src/finestra.ce", "-l", "SDL2", "prog/grafica.com", "20"], cwd=RADICE,
+                       capture_output=True, text=True, env=dict(os.environ, SDL_VIDEODRIVER="dummy"))
+    esito("finestra SDL2 (driver finto)", r.returncode == 0, r.stderr[:300])
+else:
+    print("saltato  finestra SDL2 (manca libsdl2-dev)")
 if "--conformita" in sys.argv or os.environ.get("CE_CONFORMITA"):
     r = comp("prova86.ce", "prova86"); esito("compilazione prova86", r.returncode == 0, r.stderr[:400])
     r = subprocess.run(["tools/tutti.sh"] + [x for x in sys.argv[1:] if not x.startswith("--")] , cwd=RADICE, capture_output=True, text=True)

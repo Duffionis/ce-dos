@@ -2,10 +2,14 @@
 // vengono intercettate e servite dal programma ospite.
 usa "cpu86.ce";
 usa "@file.ce";
+usa "@testo.ce";
 
 esterna funzione putchar(c: intero) -> intero;
 esterna funzione getchar() -> intero;
 esterna funzione fflush(f: *byte) -> intero;
+esterna funzione system(c: *byte) -> intero;
+esterna funzione read(fd: intero, buf: *byte, n: dimensione) -> lungo;
+esterna funzione usleep(us: naturale32) -> intero;
 esterna funzione fgetc(f: *byte) -> intero;
 esterna funzione fputc(c: intero, f: *byte) -> intero;
 esterna funzione remove(percorso: *byte) -> intero;
@@ -218,24 +222,63 @@ funzione scrivi_ppm(percorso: testo) {
 funzione al() -> byte { ritorna reg8(0); }
 funzione ah() -> byte { ritorna reg8(4); }
 
+variabile vivo: booleano;          // tastiera "viva": nessun blocco, il programma ospite continua a girare
+variabile tasto_buf: intero = -1;
+variabile manca: booleano;         // un servizio bloccante non ha trovato tasti
+variabile attesa: booleano;        // l'ultima istruzione e' stata rimandata: aspettare
+variabile linea_attiva: booleano;
+variabile linea_n: naturale16;
+
+// legge i tasti premuti (terminale non bloccante)
+funzione sonda_tasti() {
+    se tasto_buf >= 0 { ritorna; }
+    variabile b: [byte; 1];
+    variabile n: lungo = 0;
+    rischio { n = read(0, &b[0], 1); }
+    se n == 1 {
+        se b[0] == 10 { tasto_buf = 13; } altrimenti { tasto_buf = b[0] come intero; }
+    }
+}
+
 // legge un carattere dalla tastiera (stdin); 0 se finito
 funzione leggi_tasto() -> byte {
+    se vivo {
+        se tasto_buf < 0 { sonda_tasti(); }
+        se tasto_buf < 0 { manca = vero; ritorna 0; }
+        costante t: byte = tasto_buf come byte;
+        tasto_buf = -1;
+        ritorna t;
+    }
     variabile c: intero = 0;
     rischio { c = getchar(); }
     se c < 0 { ritorna 26; }
     ritorna c come byte;
 }
 
+// il servizio non ha ottenuto il tasto: rieseguire l'INT piu' tardi
+funzione rimanda_int() {
+    manca = falso; attesa = vero;
+    ip = ip - 2;
+}
+
 funzione servizio_dos() {
     costante f: byte = ah();
     scegli f {
         caso 0 { uscita = vero; }
-        caso 1 { costante c: byte = leggi_tasto(); emetti(c); imposta_reg8(0, c); }
+        caso 1 {
+            costante c: byte = leggi_tasto();
+            se manca { rimanda_int(); ritorna; }
+            emetti(c); imposta_reg8(0, c);
+        }
         caso 2 { emetti(reg8(2)); }
         caso 6 {
             se reg8(2) != 255 { emetti(reg8(2)); } altrimenti { imposta_reg8(0, 0); imposta(F_ZF, vero); }
         }
-        caso 7, 8 { imposta_reg8(0, leggi_tasto()); }
+        caso 7, 8 {
+            costante c: byte = leggi_tasto();
+            se manca { rimanda_int(); ritorna; }
+            imposta_reg8(0, c);
+        }
         caso 9 {
             variabile o: naturale16 = r[DX];
             mentre leggi8(sg[DS], o) != 36 { emetti(leggi8(sg[DS], o)); o = o + 1; }
@@ -244,17 +287,25 @@ funzione servizio_dos() {
             // lettura con buffer: [max][letti][dati...]
             costante base: naturale16 = r[DX];
             costante massimo: naturale16 = leggi8(sg[DS], base) come naturale16;
-            variabile n: naturale16 = 0;
+            se !linea_attiva { linea_n = 0; linea_attiva = vero; }
+            variabile n: naturale16 = linea_n;
             variabile fine: booleano = falso;
             mentre !fine {
                 costante c: byte = leggi_tasto();
+                se manca { linea_n = n; rimanda_int(); ritorna; }
                 se c == 10 || c == 13 || c == 26 { fine = vero; }
-                altrimenti se n + 1 < massimo { scrivi8(sg[DS], base + 2 + n, c); n = n + 1; }
+                altrimenti se c == 8 { se n > 0 { n = n - 1; se vivo { emetti(8); emetti(32); emetti(8); } } }
+                altrimenti se n + 1 < massimo { scrivi8(sg[DS], base + 2 + n, c); n = n + 1; se vivo { emetti(c); } }
             }
+            linea_attiva = falso;
+            se vivo { emetti(13); emetti(10); }
             scrivi8(sg[DS], base + 1, n come byte);
             scrivi8(sg[DS], base + 2 + n, 13);
         }
-        caso 11 { imposta_reg8(0, 0); }
+        caso 11 {
+            se vivo { sonda_tasti(); }
+            se tasto_buf >= 0 { imposta_reg8(0, 255); } altrimenti { imposta_reg8(0, 0); }
+        }
         caso 12 { imposta_reg8(0, 0); }
         caso 14 { imposta_reg8(0, 26); }
         caso 25 { imposta_reg8(0, 2); }
@@ -330,8 +381,15 @@ funzione servizio_video() {
 
 funzione servizio_tastiera() {
     scegli ah() {
-        caso 0, 16 { r[AX] = leggi_tasto() come naturale16; }
-        caso 1, 17 { imposta(F_ZF, vero); }
+        caso 0, 16 {
+            costante c: byte = leggi_tasto();
+            se manca { rimanda_int(); ritorna; }
+            r[AX] = c come naturale16;
+        }
+        caso 1, 17 {
+            se vivo { sonda_tasti(); }
+            se tasto_buf >= 0 { imposta(F_ZF, falso); r[AX] = tasto_buf come naturale16; } altrimenti { imposta(F_ZF, vero); }
+        }
         altrimenti { }
     }
 }
@@ -404,7 +462,8 @@ funzione carica_com(d: [byte]) {
 
 funzione esegui(massimo: naturale64) -> naturale64 {
     variabile n: naturale64 = 0;
-    mentre !uscita && !fermo && n < massimo {
+    attesa = falso;
+    mentre !uscita && !fermo && n < massimo && !attesa {
         passo();
         se int_sospesa >= 0 {
             costante v: byte = int_sospesa come byte;
@@ -414,3 +473,57 @@ funzione esegui(massimo: naturale64) -> naturale64 {
     }
     ritorna n;
 }
+
+// ---------- terminale vivo ----------
+variabile ultimo_controllo: naturale32;
+
+funzione disegna_terminale(forza: booleano) {
+    variabile somma: naturale32 = 0;
+    variabile i: naturale16 = 0;
+    mentre i < 4000 { somma = somma * 31 + (leggi8(47104, i) come naturale32); i += 1; }
+    somma = somma + (riga * 100 + col) come naturale32;
+    se somma == ultimo_controllo && !forza { ritorna; }
+    ultimo_controllo = somma;
+    rischio { putchar(27); putchar(91); putchar(72); }
+    variabile y: naturale16 = 0;
+    mentre y < 25 {
+        variabile x: naturale16 = 0;
+        mentre x < 80 {
+            variabile b: byte = leggi8(47104, cella(x, y));
+            se b < 32 { b = 32; }
+            rischio { putchar(b come intero); }
+            x += 1;
+        }
+        rischio { putchar(10); }
+        y += 1;
+    }
+    // cursore
+    rischio {
+        putchar(27); putchar(91);
+        variabile s: Stringa = nuova_stringa();
+        aggiungi_numero(s, (riga + 1) come lungo); aggiungi_byte(s, 59); aggiungi_numero(s, (col + 1) come lungo); aggiungi_byte(s, 72);
+        variabile k: dimensione = 0;
+        costante t: testo = come_testo(s);
+        mentre k < t.lunghezza { putchar(t[k] come intero); k += 1; }
+        libera_stringa(s);
+    }
+}
+
+funzione esegui_vivo() {
+    rischio { system(&comando_raw()[0]); putchar(27); putchar(91); putchar(50); putchar(74); }
+    vivo = vero; schermo_attivo = vero;
+    mentre !uscita && !fermo {
+        sonda_tasti();
+        se tasto_buf == 29 { uscita = vero; }
+        altrimenti {
+            esegui(40000);
+            disegna_terminale(falso);
+            se attesa { rischio { usleep(15000); } }
+        }
+    }
+    disegna_terminale(vero);
+    rischio { system(&comando_sano()[0]); putchar(10); }
+}
+
+funzione comando_raw() -> [byte] { ritorna testo_c("stty -icanon -echo -isig min 0 time 0"); }
+funzione comando_sano() -> [byte] { ritorna testo_c("stty sane"); }

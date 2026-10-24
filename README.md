@@ -25,7 +25,11 @@ flag "indefiniti" spinti sullo stack non imitano il chip. Cicli e coda di prefet
     ./cedos prog/grafica.com --ppm out.ppm  # VGA modo 13h (A000:0000) + palette DAC, salvato come immagine
 La palette predefinita e' un'approssimazione di quella VGA (i primi 16 colori sono quelli veri).
 
+## Interattivo
+    ./cedos programma.com --vivo        # terminale: schermo 80x25 che si aggiorna, tastiera in tempo reale (Ctrl-] esce)
+    ./ce esegui src/finestra.ce -l SDL2 prog/grafica.com    # finestra SDL2 per la grafica 13h (sul tuo PC, non in un Codespace)
+
 ## Non fatto ancora
-directory e memoria DOS (INT 21h 48h-4Ah), finestra in tempo reale (SDL), 286/386, suono.
+directory e memoria DOS (INT 21h 48h-4Ah), testo nella finestra SDL (serve un font), 286/386, suono.
 
 Nessun BIOS, ROM o chiave e' incluso. Le prove di conformita' si scaricano da SingleStepTests.

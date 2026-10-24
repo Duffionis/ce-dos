@@ -22,6 +22,10 @@ funzione principale() -> intero {
         i += 1;
     }
     inizializza_dac();
+    variabile in_vivo: booleano = falso;
+    i = 2;
+    mentre i < numero_argomenti() { se testo_uguale(argomento(i), "--vivo") { in_vivo = vero; } i += 1; }
+    se in_vivo { pulisci_schermo(); esegui_vivo(); ritorna codice_uscita come intero; }
     esegui(2000000000);
     se schermo_attivo && modo_video != 19 { mostra_schermo(); }
     se ppm.lunghezza > 0 { scrivi_ppm(ppm); }

@@ -1,0 +1,91 @@
+// Finestra SDL2 per i programmi grafici (VGA modo 13h) con la tastiera.
+//   ./ce esegui src/finestra.ce -l SDL2 prog/grafica.com [fotogrammi]
+// (il testo si vede nel terminale con: ./cedos programma.com --vivo)
+usa "dos.ce";
+usa "@testo.ce";
+usa "@risultato.ce";
+
+esterna funzione SDL_Init(flags: naturale32) -> intero;
+esterna funzione SDL_Quit();
+esterna funzione SDL_CreateWindow(titolo: *byte, x: intero, y: intero, l: intero, a: intero, flags: naturale32) -> *byte;
+esterna funzione SDL_CreateRenderer(w: *byte, indice: intero, flags: naturale32) -> *byte;
+esterna funzione SDL_CreateTexture(r: *byte, formato: naturale32, accesso: intero, l: intero, a: intero) -> *byte;
+esterna funzione SDL_UpdateTexture(t: *byte, rett: *byte, pixel: *byte, passo: intero) -> intero;
+esterna funzione SDL_RenderClear(r: *byte) -> intero;
+esterna funzione SDL_RenderCopy(r: *byte, t: *byte, a: *byte, b: *byte) -> intero;
+esterna funzione SDL_RenderPresent(r: *byte);
+esterna funzione SDL_PollEvent(evento: *byte) -> intero;
+esterna funzione SDL_Delay(ms: naturale32);
+
+variabile pixel: [naturale32; 64000];
+
+funzione principale() -> intero {
+    se numero_argomenti() < 2 { stampa("uso: finestra programma.com [fotogrammi]"); ritorna 2; }
+    costante lett: Risultato<[byte], testo> = leggi_file(argomento(1));
+    se !lett.riuscito { stampa("errore: ", lett.errore); ritorna 1; }
+    costante d: [byte] = lett.valore;
+    se d.lunghezza > 1 && d[0] == 77 && d[1] == 90 {
+        se !carica_exe(d) { stampa("EXE non valido"); ritorna 2; }
+    } altrimenti {
+        carica_com(d);
+    }
+    inizializza_dac();
+    vivo = vero;
+    variabile massimo: naturale64 = 0;
+    se numero_argomenti() > 2 {
+        costante q: Risultato<lungo, testo> = numero_da_testo(argomento(2));
+        se q.riuscito && q.valore > 0 { massimo = q.valore come naturale64; }
+    }
+    variabile titolo: [byte; 8] = [67, 69, 45, 68, 79, 83, 0, 0];     // "CE-DOS"
+    variabile evento: [byte; 64];
+    variabile finestra: *byte;
+    variabile pennello: *byte;
+    variabile trama: *byte;
+    rischio {
+        se SDL_Init(32) != 0 { stampa("errore: SDL non parte"); ritorna 1; }
+        finestra = SDL_CreateWindow(&titolo[0], 100, 100, 960, 600, 4);
+        pennello = SDL_CreateRenderer(finestra, -1, 2);
+        trama = SDL_CreateTexture(pennello, 372645892, 1, 320, 200);
+    }
+    variabile fatti: naturale64 = 0;
+    variabile attivo: booleano = vero;
+    mentre attivo && !uscita && !fermo {
+        variabile ev: intero = 1;
+        mentre ev != 0 {
+            rischio { ev = SDL_PollEvent(&evento[0]); }
+            se ev != 0 {
+                costante tipo: naturale32 = (evento[0] come naturale32) | ((evento[1] come naturale32) << 8)
+                                          | ((evento[2] come naturale32) << 16) | ((evento[3] come naturale32) << 24);
+                se tipo == 256 { attivo = falso; }
+                se tipo == 768 {   // tasto premuto: keysym a 20 byte dall'inizio
+                    costante sym: naturale32 = (evento[20] come naturale32) | ((evento[21] come naturale32) << 8);
+                    se sym == 27 { attivo = falso; }
+                    se sym < 128 && tasto_buf < 0 {
+                        se sym == 13 { tasto_buf = 13; } altrimenti { tasto_buf = sym come intero; }
+                    }
+                }
+            }
+        }
+        esegui(60000);
+        variabile i: naturale16 = 0;
+        mentre i < 64000 {
+            costante c: dimensione = leggi8(40960, i) come dimensione;
+            costante rr: naturale32 = ((dac[c * 3] come naturale32) * 255) / 63;
+            costante gg: naturale32 = ((dac[c * 3 + 1] come naturale32) * 255) / 63;
+            costante bb: naturale32 = ((dac[c * 3 + 2] come naturale32) * 255) / 63;
+            pixel[i] = 4278190080 | (rr << 16) | (gg << 8) | bb;
+            i += 1;
+        }
+        rischio {
+            SDL_UpdateTexture(trama, (0 come dimensione) come *byte, (&pixel[0]) come *byte, 1280);
+            SDL_RenderClear(pennello);
+            SDL_RenderCopy(pennello, trama, (0 come dimensione) come *byte, (0 come dimensione) come *byte);
+            SDL_RenderPresent(pennello);
+            SDL_Delay(16);
+        }
+        fatti += 1;
+        se massimo > 0 && fatti >= massimo { attivo = falso; }
+    }
+    rischio { SDL_Quit(); }
+    ritorna codice_uscita come intero;
+}
