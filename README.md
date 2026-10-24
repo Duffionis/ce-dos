@@ -3,7 +3,7 @@
 Un emulatore 8086 + servizi DOS "alla DOSBox", scritto in **Ce++** (il linguaggio italiano per sistemi: https://github.com/Duffionis/Ce-).
 
 - `src/cpu86.ce`: la CPU 8086 completa (tutti gli opcode, flag, stringhe, BCD, mul/div).
-- `src/dos.ce`: le interruzioni DOS/BIOS servite dall'ospite (INT 21h testo/tastiera/uscita, INT 10h teletype, INT 16h, INT 1Ah, INT 20h) e il caricatore `.COM`.
+- `src/dos.ce`: le interruzioni DOS/BIOS servite dall'ospite (INT 21h testo/tastiera/uscita/file 3Ch-42h, INT 10h teletype, INT 16h, INT 1Ah, INT 20h) e i caricatori `.COM` e `.EXE` (rilocazione MZ).
 - `src/prova86.ce` + `tools/`: verifica contro i test di riferimento **SingleStepTests/8088** (scaricati, non inclusi).
 
 ## Uso
@@ -21,6 +21,6 @@ DIV/IDIV (F6/F7 /6 /7): gli esiti normali sono giusti, ma sull'errore di divisio
 flag "indefiniti" spinti sullo stack non imitano il chip. Cicli e coda di prefetch non sono emulati.
 
 ## Non fatto ancora
-`.EXE` (rilocazione MZ), file DOS (INT 21h 3Ch-3Fh), schermo a caratteri e grafica VGA, 286/386.
+directory e memoria DOS (INT 21h 48h-4Ah), schermo a caratteri e grafica VGA, 286/386.
 
 Nessun BIOS, ROM o chiave e' incluso. Le prove di conformita' si scaricano da SingleStepTests.

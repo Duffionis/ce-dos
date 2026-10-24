@@ -6,7 +6,12 @@ funzione principale() -> intero {
     se numero_argomenti() < 2 { stampa("uso: ce-dos programma.com"); ritorna 2; }
     costante lett: Risultato<[byte], testo> = leggi_file(argomento(1));
     se !lett.riuscito { stampa("errore: ", lett.errore); ritorna 2; }
-    carica_com(lett.valore);
+    costante d: [byte] = lett.valore;
+    se d.lunghezza > 1 && d[0] == 77 && d[1] == 90 {
+        se !carica_exe(d) { stampa("EXE non valido"); ritorna 2; }
+    } altrimenti {
+        carica_com(d);
+    }
     esegui(2000000000);
     ritorna codice_uscita come intero;
 }

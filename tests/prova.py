@@ -16,6 +16,10 @@ r = subprocess.run(["./cedos", "prog/ciao.com"], cwd=RADICE, capture_output=True
 esito("ciao.com", r.stdout == "Ciao dal DOS in Ce++!\n54321" and r.returncode == 7, repr(r.stdout))
 r = subprocess.run(["./cedos", "prog/eco.com"], cwd=RADICE, input="hello dos\n", capture_output=True, text=True)
 esito("eco.com (tastiera)", r.stdout == "HELLO DOS\n", repr(r.stdout))
+r = subprocess.run(["./cedos", "prog/exe.exe"], cwd=RADICE, capture_output=True, text=True)
+esito("exe.exe (rilocazione MZ)", r.stdout == "EXE rilocato ok\n" and r.returncode == 5, repr(r.stdout))
+r = subprocess.run(["./cedos", "prog/file.com"], cwd=RADICE, capture_output=True, text=True)
+esito("file.com (crea, scrive, legge, cancella)", r.stdout == "DOS!!" and r.returncode == 0, repr(r.stdout))
 if "--conformita" in sys.argv or os.environ.get("CE_CONFORMITA"):
     r = comp("prova86.ce", "prova86"); esito("compilazione prova86", r.returncode == 0, r.stderr[:400])
     r = subprocess.run(["tools/tutti.sh"] + [x for x in sys.argv[1:] if not x.startswith("--")] , cwd=RADICE, capture_output=True, text=True)

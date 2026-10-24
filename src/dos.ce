@@ -1,15 +1,119 @@
 // Servizi DOS/BIOS "alla DOSBox": invece di caricare un vero DOS, le interruzioni
 // vengono intercettate e servite dal programma ospite.
 usa "cpu86.ce";
+usa "@file.ce";
 
 esterna funzione putchar(c: intero) -> intero;
 esterna funzione getchar() -> intero;
 esterna funzione fflush(f: *byte) -> intero;
+esterna funzione fgetc(f: *byte) -> intero;
+esterna funzione fputc(c: intero, f: *byte) -> intero;
+esterna funzione remove(percorso: *byte) -> intero;
 
 variabile uscita: booleano;
 variabile codice_uscita: byte;
 variabile dta: naturale16 = 128;
 variabile seg_psp: naturale16 = 4096;
+variabile aperti: [*byte; 20];
+
+funzione non_valido(f: *byte) -> booleano {
+    rischio { ritorna f == ((0 come dimensione) come *byte); }
+}
+
+// il percorso ASCIIZ in DS:DX come stringa C
+funzione percorso_dos() -> [byte] {
+    variabile m: [byte] = riserva(byte, 130);
+    variabile i: dimensione = 0;
+    mentre i < 128 {
+        costante c: byte = leggi8(sg[DS], r[DX] + (i come naturale16));
+        m[i] = c;
+        se c == 0 { ritorna m; }
+        i += 1;
+    }
+    m[128] = 0;
+    ritorna m;
+}
+
+funzione errore_dos(codice: naturale16) { r[AX] = codice; imposta(F_CF, vero); }
+
+funzione apri_dos(modo: testo) {
+    variabile p: [byte] = percorso_dos();
+    variabile m: [byte] = testo_c(modo);
+    variabile f: *byte;
+    rischio { f = fopen(&p[0], &m[0]); libera(p); libera(m); }
+    se non_valido(f) { errore_dos(2); ritorna; }
+    variabile i: dimensione = 0;
+    mentre i < 20 {
+        se non_valido(aperti[i]) { aperti[i] = f; r[AX] = (i come naturale16) + 5; imposta(F_CF, falso); ritorna; }
+        i += 1;
+    }
+    rischio { fclose(f); }
+    errore_dos(4);
+}
+
+funzione maniglia() -> *byte {
+    variabile nulla: *byte;
+    rischio { nulla = (0 come dimensione) come *byte; }
+    se r[BX] < 5 || r[BX] >= 25 { ritorna nulla; }
+    ritorna aperti[(r[BX] - 5) come dimensione];
+}
+
+funzione servizio_file(f: byte) {
+    imposta(F_CF, falso);
+    scegli f {
+        caso 60 { apri_dos("w+b"); }
+        caso 61 { se (al() & 3) == 0 { apri_dos("rb"); } altrimenti { apri_dos("r+b"); } }
+        caso 62 {
+            costante h: *byte = maniglia();
+            se non_valido(h) { errore_dos(6); ritorna; }
+            rischio { fclose(h); }
+            variabile nulla: *byte;
+            rischio { nulla = (0 come dimensione) come *byte; }
+            aperti[(r[BX] - 5) come dimensione] = nulla;
+        }
+        caso 63 {
+            costante h: *byte = maniglia();
+            se non_valido(h) { errore_dos(6); ritorna; }
+            variabile n: naturale16 = 0;
+            mentre n < r[CX] {
+                variabile c: intero = 0;
+                rischio { c = fgetc(h); }
+                se c < 0 { r[CX] = n; }
+                altrimenti { scrivi8(sg[DS], r[DX] + n, c come byte); n = n + 1; }
+            }
+            r[AX] = n;
+        }
+        caso 64 {
+            costante h: *byte = maniglia();
+            se non_valido(h) { errore_dos(6); ritorna; }
+            variabile n: naturale16 = 0;
+            mentre n < r[CX] {
+                rischio { fputc(leggi8(sg[DS], r[DX] + n) come intero, h); }
+                n = n + 1;
+            }
+            r[AX] = n;
+        }
+        caso 65 {
+            variabile p: [byte] = percorso_dos();
+            variabile e: intero = 0;
+            rischio { e = remove(&p[0]); libera(p); }
+            se e != 0 { errore_dos(2); }
+        }
+        caso 66 {
+            costante h: *byte = maniglia();
+            se non_valido(h) { errore_dos(6); ritorna; }
+            costante spo: lungo = ((r[CX] come lungo) << 16) | (r[DX] come lungo);
+            variabile pos: lungo = 0;
+            rischio {
+                fseek(h, spo, al() come intero);
+                pos = ftell(h);
+            }
+            r[AX] = (pos & 65535) come naturale16;
+            r[DX] = ((pos >> 16) & 65535) come naturale16;
+        }
+        altrimenti { errore_dos(1); }
+    }
+}
 
 funzione emetti(c: byte) { rischio { putchar(c come intero); } }
 
@@ -68,14 +172,16 @@ funzione servizio_dos() {
         }
         caso 44 { r[CX] = 0; r[DX] = 0; }   // ora
         caso 42 { r[CX] = 2026; r[DX] = 1024; imposta_reg8(0, 6); }
+        caso 60, 61, 62, 63, 65, 66 { servizio_file(f); }
         caso 64 {
-            // scrittura su file: solo schermo (1, 2)
-            se r[BX] == 1 || r[BX] == 2 {
+            // scrittura: schermo (1, 2) oppure file
+            se r[BX] != 1 && r[BX] != 2 { servizio_file(f); }
+            altrimenti se r[BX] == 1 || r[BX] == 2 {
                 variabile i: naturale16 = 0;
                 mentre i < r[CX] { emetti(leggi8(sg[DS], r[DX] + i)); i = i + 1; }
                 r[AX] = r[CX];
                 imposta(F_CF, falso);
-            } altrimenti { r[AX] = 6; imposta(F_CF, vero); }
+            }
         }
         caso 76 { codice_uscita = al(); uscita = vero; }
         altrimenti { imposta(F_CF, vero); r[AX] = 1; }
@@ -108,6 +214,51 @@ funzione intercetta(n: byte) -> booleano {
         caso 26 { r[CX] = 0; r[DX] = 0; imposta_reg8(0, 0); ritorna vero; }
         altrimenti { ritorna falso; }
     }
+}
+
+// .EXE (MZ): ritorna falso se l'intestazione non e' valida
+funzione carica_exe(d: [byte]) -> booleano {
+    se d.lunghezza < 28 { ritorna falso; }
+    ritorna carica_exe_dati(d);
+}
+
+funzione parola_exe(d: [byte], o: dimensione) -> naturale16 {
+    ritorna (d[o] come naturale16) | ((d[o + 1] come naturale16) << 8);
+}
+
+funzione carica_exe_dati(d: [byte]) -> booleano {
+    costante ultima: naturale32 = parola_exe(d, 2) come naturale32;
+    costante pagine: naturale32 = parola_exe(d, 4) come naturale32;
+    costante nrilo: dimensione = parola_exe(d, 6) come dimensione;
+    costante testata: naturale32 = (parola_exe(d, 8) come naturale32) * 16;
+    costante tab: dimensione = parola_exe(d, 24) come dimensione;
+    variabile fine: naturale32 = pagine * 512;
+    se ultima != 0 { fine = (pagine - 1) * 512 + ultima; }
+    se fine > (d.lunghezza come naturale32) { fine = d.lunghezza come naturale32; }
+    costante inizio: naturale16 = seg_psp + 16;
+    scrivi8(seg_psp, 0, 205); scrivi8(seg_psp, 1, 32);
+    variabile i: naturale32 = testata;
+    mentre i < fine {
+        scrivi8(inizio, ((i - testata) & 65535) come naturale16, d[i come dimensione]);
+        // i moduli piu' grandi di 64K cambiano segmento
+        i += 1;
+    }
+    variabile k: dimensione = 0;
+    mentre k < nrilo {
+        costante o: dimensione = tab + k * 4;
+        costante off: naturale16 = parola_exe(d, o);
+        costante sgm: naturale16 = parola_exe(d, o + 2);
+        costante v: naturale16 = leggi16(inizio + sgm, off);
+        scrivi16(inizio + sgm, off, v + inizio);
+        k += 1;
+    }
+    sg[ES] = seg_psp; sg[DS] = seg_psp;
+    sg[SS] = inizio + parola_exe(d, 14);
+    r[SP] = parola_exe(d, 16);
+    ip = parola_exe(d, 20);
+    sg[CS] = inizio + parola_exe(d, 22);
+    flag = 514;
+    ritorna vero;
 }
 
 funzione carica_com(d: [byte]) {
