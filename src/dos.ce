@@ -1,0 +1,133 @@
+// Servizi DOS/BIOS "alla DOSBox": invece di caricare un vero DOS, le interruzioni
+// vengono intercettate e servite dal programma ospite.
+usa "cpu86.ce";
+
+esterna funzione putchar(c: intero) -> intero;
+esterna funzione getchar() -> intero;
+esterna funzione fflush(f: *byte) -> intero;
+
+variabile uscita: booleano;
+variabile codice_uscita: byte;
+variabile dta: naturale16 = 128;
+variabile seg_psp: naturale16 = 4096;
+
+funzione emetti(c: byte) { rischio { putchar(c come intero); } }
+
+funzione al() -> byte { ritorna reg8(0); }
+funzione ah() -> byte { ritorna reg8(4); }
+
+// legge un carattere dalla tastiera (stdin); 0 se finito
+funzione leggi_tasto() -> byte {
+    variabile c: intero = 0;
+    rischio { c = getchar(); }
+    se c < 0 { ritorna 26; }
+    ritorna c come byte;
+}
+
+funzione servizio_dos() {
+    costante f: byte = ah();
+    scegli f {
+        caso 0 { uscita = vero; }
+        caso 1 { costante c: byte = leggi_tasto(); emetti(c); imposta_reg8(0, c); }
+        caso 2 { emetti(reg8(2)); }
+        caso 6 {
+            se reg8(2) != 255 { emetti(reg8(2)); } altrimenti { imposta_reg8(0, 0); imposta(F_ZF, vero); }
+        }
+        caso 7, 8 { imposta_reg8(0, leggi_tasto()); }
+        caso 9 {
+            variabile o: naturale16 = r[DX];
+            mentre leggi8(sg[DS], o) != 36 { emetti(leggi8(sg[DS], o)); o = o + 1; }
+        }
+        caso 10 {
+            // lettura con buffer: [max][letti][dati...]
+            costante base: naturale16 = r[DX];
+            costante massimo: naturale16 = leggi8(sg[DS], base) come naturale16;
+            variabile n: naturale16 = 0;
+            variabile fine: booleano = falso;
+            mentre !fine {
+                costante c: byte = leggi_tasto();
+                se c == 10 || c == 13 || c == 26 { fine = vero; }
+                altrimenti se n + 1 < massimo { scrivi8(sg[DS], base + 2 + n, c); n = n + 1; }
+            }
+            scrivi8(sg[DS], base + 1, n come byte);
+            scrivi8(sg[DS], base + 2 + n, 13);
+        }
+        caso 11 { imposta_reg8(0, 0); }
+        caso 12 { imposta_reg8(0, 0); }
+        caso 14 { imposta_reg8(0, 26); }
+        caso 25 { imposta_reg8(0, 2); }
+        caso 26 { dta = r[DX]; }
+        caso 37 {
+            costante n: naturale16 = reg8(0) come naturale16;
+            scrivi16(0, n * 4, r[DX]); scrivi16(0, n * 4 + 2, sg[DS]);
+        }
+        caso 48 { r[AX] = 5; }   // DOS 5.0
+        caso 53 {
+            costante n: naturale16 = reg8(0) come naturale16;
+            r[BX] = leggi16(0, n * 4); sg[ES] = leggi16(0, n * 4 + 2);
+        }
+        caso 44 { r[CX] = 0; r[DX] = 0; }   // ora
+        caso 42 { r[CX] = 2026; r[DX] = 1024; imposta_reg8(0, 6); }
+        caso 64 {
+            // scrittura su file: solo schermo (1, 2)
+            se r[BX] == 1 || r[BX] == 2 {
+                variabile i: naturale16 = 0;
+                mentre i < r[CX] { emetti(leggi8(sg[DS], r[DX] + i)); i = i + 1; }
+                r[AX] = r[CX];
+                imposta(F_CF, falso);
+            } altrimenti { r[AX] = 6; imposta(F_CF, vero); }
+        }
+        caso 76 { codice_uscita = al(); uscita = vero; }
+        altrimenti { imposta(F_CF, vero); r[AX] = 1; }
+    }
+}
+
+funzione servizio_video() {
+    scegli ah() {
+        caso 14 { emetti(al()); }
+        caso 15 { r[AX] = 80 * 256 + 3; imposta_reg8(7, 0); }
+        altrimenti { }
+    }
+}
+
+funzione servizio_tastiera() {
+    scegli ah() {
+        caso 0, 16 { r[AX] = leggi_tasto() come naturale16; }
+        caso 1, 17 { imposta(F_ZF, vero); }
+        altrimenti { }
+    }
+}
+
+// vero se l'interruzione e' stata servita dall'ospite
+funzione intercetta(n: byte) -> booleano {
+    scegli n {
+        caso 32 { uscita = vero; ritorna vero; }
+        caso 33 { servizio_dos(); ritorna vero; }
+        caso 16 { servizio_video(); ritorna vero; }
+        caso 22 { servizio_tastiera(); ritorna vero; }
+        caso 26 { r[CX] = 0; r[DX] = 0; imposta_reg8(0, 0); ritorna vero; }
+        altrimenti { ritorna falso; }
+    }
+}
+
+funzione carica_com(d: [byte]) {
+    sg[CS] = seg_psp; sg[DS] = seg_psp; sg[ES] = seg_psp; sg[SS] = seg_psp;
+    scrivi8(seg_psp, 0, 205); scrivi8(seg_psp, 1, 32);     // INT 20h
+    variabile i: dimensione = 0;
+    mentre i < d.lunghezza { scrivi8(seg_psp, 256 + (i come naturale16), d[i]); i += 1; }
+    ip = 256; r[SP] = 65534; scrivi16(seg_psp, 65534, 0);
+    flag = 514;
+}
+
+funzione esegui(massimo: naturale64) -> naturale64 {
+    variabile n: naturale64 = 0;
+    mentre !uscita && !fermo && n < massimo {
+        passo();
+        se int_sospesa >= 0 {
+            costante v: byte = int_sospesa come byte;
+            se intercetta(v) { int_sospesa = -1; } altrimenti { servi_int(); }
+        }
+        n += 1;
+    }
+    ritorna n;
+}

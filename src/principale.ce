@@ -1,0 +1,12 @@
+usa "dos.ce";
+usa "@file.ce";
+usa "@risultato.ce";
+
+funzione principale() -> intero {
+    se numero_argomenti() < 2 { stampa("uso: ce-dos programma.com"); ritorna 2; }
+    costante lett: Risultato<[byte], testo> = leggi_file(argomento(1));
+    se !lett.riuscito { stampa("errore: ", lett.errore); ritorna 2; }
+    carica_com(lett.valore);
+    esegui(2000000000);
+    ritorna codice_uscita come intero;
+}

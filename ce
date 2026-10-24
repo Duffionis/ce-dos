@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Lancia il compilatore Ce++ (https://github.com/Duffionis/Ce-), scaricandolo la prima volta.
+#   ./ce esegui src/principale.ce prova roms/2-ibm-logo.ch8
+# Per usare una copia che hai gia': CE_COMPILATORE=/percorso/di/Ce- ./ce esegui ...
+set -e
+QUI="$(cd "$(dirname "$0")" && pwd)"
+COMP="$QUI/.compilatore"
+PIN="v0.3"   # versione del compilatore con cui questo programma e' stato provato
+if [ -n "$CE_COMPILATORE" ]; then
+  [ -d "$COMP" ] && [ ! -L "$COMP" ] && rm -rf "$COMP"
+  ln -sfn "$CE_COMPILATORE" "$COMP"
+else
+  [ -f "$COMP/ce-lang/ce.py" ] || { rm -rf "$COMP"; git clone -q https://github.com/Duffionis/Ce- "$COMP"; }
+  if [ "$(git -C "$COMP" rev-parse HEAD)" != "$(git -C "$COMP" rev-parse -q --verify "$PIN^{commit}" || echo -)" ]; then
+    git -C "$COMP" fetch -q --tags origin
+    git -C "$COMP" checkout -q "$PIN"
+  fi
+fi
+exec python3 "$COMP/ce-lang/ce.py" "$@"

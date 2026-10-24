@@ -1,0 +1,815 @@
+// CPU 8086 (la stessa dell'IBM PC originale), scritta in Ce++.
+// Registri, memoria da 1 MiB e flag sono variabili globali; 'passo()' esegue una istruzione.
+usa "@file.ce";
+
+// ---------- stato ----------
+variabile memoria: [byte; 1048576];
+variabile r: [naturale16; 8];        // AX CX DX BX SP BP SI DI
+variabile sg: [naturale16; 4];       // ES CS SS DS
+variabile ip: naturale16;
+variabile flag: naturale16;
+variabile fermo: booleano;           // dopo HLT
+variabile tratta_errore: intero;     // 0 = nessuno, 1 = istruzione sconosciuta
+variabile ultimo_codice: byte;
+
+elenco: dimensione { AX, CX, DX, BX, SP, BP, SI, DI }
+elenco: dimensione { ES, CS, SS, DS }
+
+elenco: naturale16 { F_CF = 1, F_PF = 4, F_AF = 16, F_ZF = 64, F_SF = 128, F_TF = 256, F_IF = 512, F_DF = 1024, F_OF = 2048 }
+
+// ---------- memoria ----------
+funzione indirizzo(segmento: naturale16, scarto: naturale16) -> dimensione {
+    ritorna ((((segmento come naturale32) << 4) + (scarto come naturale32)) & 1048575) come dimensione;
+}
+
+funzione leggi8(segmento: naturale16, scarto: naturale16) -> byte {
+    ritorna memoria[indirizzo(segmento, scarto)];
+}
+
+funzione scrivi8(segmento: naturale16, scarto: naturale16, v: byte) {
+    memoria[indirizzo(segmento, scarto)] = v;
+}
+
+funzione leggi16(segmento: naturale16, scarto: naturale16) -> naturale16 {
+    costante basso: naturale16 = leggi8(segmento, scarto) come naturale16;
+    costante alto: naturale16 = leggi8(segmento, scarto + 1) come naturale16;
+    ritorna basso | (alto << 8);
+}
+
+funzione scrivi16(segmento: naturale16, scarto: naturale16, v: naturale16) {
+    scrivi8(segmento, scarto, (v & 255) come byte);
+    scrivi8(segmento, scarto + 1, (v >> 8) come byte);
+}
+
+// ---------- flag ----------
+funzione ce(maschera: naturale16) -> booleano {
+    ritorna (flag & maschera) != 0;
+}
+
+funzione imposta(maschera: naturale16, acceso: booleano) {
+    se acceso { flag = flag | maschera; } altrimenti { flag = flag & ~maschera; }
+}
+
+funzione parita_pari(v: naturale32) -> booleano {
+    variabile x: naturale32 = v & 255;
+    x = x ^ (x >> 4);
+    x = x ^ (x >> 2);
+    x = x ^ (x >> 1);
+    ritorna (x & 1) == 0;
+}
+
+funzione bit_segno(largo: booleano) -> naturale32 {
+    se largo { ritorna 32768; }
+    ritorna 128;
+}
+
+funzione maschera_di(largo: booleano) -> naturale32 {
+    se largo { ritorna 65535; }
+    ritorna 255;
+}
+
+// ZF, SF, PF dal risultato.
+funzione imposta_zsp(ris: naturale32, largo: booleano) {
+    costante v: naturale32 = ris & maschera_di(largo);
+    imposta(F_ZF, v == 0);
+    imposta(F_SF, (v & bit_segno(largo)) != 0);
+    imposta(F_PF, parita_pari(v));
+}
+
+// ---------- ALU: 0 ADD, 1 OR, 2 ADC, 3 SBB, 4 AND, 5 SUB, 6 XOR, 7 CMP ----------
+funzione alu(op: dimensione, a: naturale32, b: naturale32, largo: booleano) -> naturale32 {
+    costante m: naturale32 = maschera_di(largo);
+    costante sg_: naturale32 = bit_segno(largo);
+    variabile ris: naturale32 = 0;
+    variabile riporto: naturale32 = 0;
+    se (op == 2 || op == 3) && ce(F_CF) { riporto = 1; }
+    scegli op {
+        caso 0, 2 {
+            ris = a + b + riporto;
+            imposta(F_CF, ris > m);
+            imposta(F_AF, ((a ^ b ^ ris) & 16) != 0);
+            imposta(F_OF, ((a ^ ris) & (b ^ ris) & sg_) != 0);
+        }
+        caso 3, 5, 7 {
+            ris = a - b - riporto;
+            imposta(F_CF, a < b + riporto);
+            imposta(F_AF, ((a ^ b ^ ris) & 16) != 0);
+            imposta(F_OF, ((a ^ b) & (a ^ ris) & sg_) != 0);
+        }
+        altrimenti {
+            se op == 1 { ris = a | b; }
+            se op == 4 { ris = a & b; }
+            se op == 6 { ris = a ^ b; }
+            imposta(F_CF, falso);
+            imposta(F_OF, falso);
+            imposta(F_AF, falso);
+        }
+    }
+    imposta_zsp(ris, largo);
+    ritorna ris & m;
+}
+
+// ---------- prefetch, registri a 8 bit, modrm ----------
+variabile ovr: dimensione = 4;          // segmento forzato da un prefisso (4 = nessuno)
+variabile ripeti: byte;
+variabile int_sospesa: intero = -1;   // INT n da servire dopo l'istruzione (l'ospite puo' intercettarla)
+
+funzione servi_int() {
+    se int_sospesa >= 0 {
+        costante n: byte = int_sospesa come byte;
+        int_sospesa = -1;
+        interruzione(n);
+    }
+}                 // 0 niente, 1 REPNE, 2 REP/REPE
+variabile m_md: dimensione;
+variabile m_reg: dimensione;
+variabile m_rm: dimensione;
+variabile m_seg: naturale16;
+variabile m_off: naturale16;
+
+funzione preleva8() -> byte {
+    costante v: byte = leggi8(sg[CS], ip);
+    ip += 1;
+    ritorna v;
+}
+
+funzione preleva16() -> naturale16 {
+    costante basso: naturale16 = preleva8() come naturale16;
+    costante alto: naturale16 = preleva8() come naturale16;
+    ritorna basso | (alto << 8);
+}
+
+funzione estendi8(v: byte) -> naturale16 {
+    se v >= 128 { ritorna 65280 | (v come naturale16); }
+    ritorna v come naturale16;
+}
+
+funzione reg8(i: dimensione) -> byte {
+    se i < 4 { ritorna (r[i] & 255) come byte; }
+    ritorna (r[i - 4] >> 8) come byte;
+}
+
+funzione imposta_reg8(i: dimensione, v: byte) {
+    se i < 4 {
+        r[i] = (r[i] & 65280) | (v come naturale16);
+    } altrimenti {
+        r[i - 4] = (r[i - 4] & 255) | ((v come naturale16) << 8);
+    }
+}
+
+funzione decodifica_modrm() {
+    costante m: byte = preleva8();
+    m_md = (m >> 6) come dimensione;
+    m_reg = ((m >> 3) & 7) come dimensione;
+    m_rm = (m & 7) come dimensione;
+    se m_md == 3 { ritorna; }
+    variabile scarto: naturale16 = 0;
+    variabile con_bp: booleano = falso;
+    scegli m_rm {
+        caso 0 { scarto = r[BX] + r[SI]; }
+        caso 1 { scarto = r[BX] + r[DI]; }
+        caso 2 { scarto = r[BP] + r[SI]; con_bp = vero; }
+        caso 3 { scarto = r[BP] + r[DI]; con_bp = vero; }
+        caso 4 { scarto = r[SI]; }
+        caso 5 { scarto = r[DI]; }
+        caso 6 {
+            se m_md == 0 { scarto = preleva16(); } altrimenti { scarto = r[BP]; con_bp = vero; }
+        }
+        altrimenti { scarto = r[BX]; }
+    }
+    se m_md == 1 { scarto = scarto + estendi8(preleva8()); }
+    se m_md == 2 { scarto = scarto + preleva16(); }
+    m_off = scarto;
+    se ovr != 4 {
+        m_seg = sg[ovr];
+    } altrimenti se con_bp {
+        m_seg = sg[SS];
+    } altrimenti {
+        m_seg = sg[DS];
+    }
+}
+
+funzione leggi_ea8() -> byte {
+    se m_md == 3 { ritorna reg8(m_rm); }
+    ritorna leggi8(m_seg, m_off);
+}
+
+funzione leggi_ea16() -> naturale16 {
+    se m_md == 3 { ritorna r[m_rm]; }
+    ritorna leggi16(m_seg, m_off);
+}
+
+funzione scrivi_ea8(v: byte) {
+    se m_md == 3 { imposta_reg8(m_rm, v); } altrimenti { scrivi8(m_seg, m_off, v); }
+}
+
+funzione scrivi_ea16(v: naturale16) {
+    se m_md == 3 { r[m_rm] = v; } altrimenti { scrivi16(m_seg, m_off, v); }
+}
+
+// ---------- pila e interruzioni ----------
+funzione spingi16(v: naturale16) {
+    r[SP] = r[SP] - 2;
+    scrivi16(sg[SS], r[SP], v);
+}
+
+funzione estrai16() -> naturale16 {
+    costante v: naturale16 = leggi16(sg[SS], r[SP]);
+    r[SP] = r[SP] + 2;
+    ritorna v;
+}
+
+funzione interruzione(n: byte) {
+    spingi16(flag);
+    spingi16(sg[CS]);
+    spingi16(ip);
+    imposta(F_IF, falso);
+    imposta(F_TF, falso);
+    costante base: naturale16 = (n come naturale16) * 4;
+    ip = leggi16(0, base);
+    sg[CS] = leggi16(0, base + 2);
+}
+
+funzione condizione(c: byte) -> booleano {
+    variabile v: booleano = falso;
+    scegli c >> 1 {
+        caso 0 { v = ce(F_OF); }
+        caso 1 { v = ce(F_CF); }
+        caso 2 { v = ce(F_ZF); }
+        caso 3 { v = ce(F_CF) || ce(F_ZF); }
+        caso 4 { v = ce(F_SF); }
+        caso 5 { v = ce(F_PF); }
+        caso 6 { v = ce(F_SF) != ce(F_OF); }
+        altrimenti { v = ce(F_ZF) || (ce(F_SF) != ce(F_OF)); }
+    }
+    se (c & 1) == 1 { ritorna !v; }
+    ritorna v;
+}
+
+// ---------- INC / DEC (non toccano CF) ----------
+funzione incdec(a: naturale32, decrementa: booleano, largo: booleano) -> naturale32 {
+    costante vecchio: booleano = ce(F_CF);
+    variabile ris: naturale32 = 0;
+    se decrementa { ris = alu(5, a, 1, largo); } altrimenti { ris = alu(0, a, 1, largo); }
+    imposta(F_CF, vecchio);
+    ritorna ris;
+}
+
+// ---------- gruppo 2: rotazioni e scorrimenti ----------
+// op: 0 ROL, 1 ROR, 2 RCL, 3 RCR, 4 SHL, 5 SHR, 6 SHL (alias), 7 SAR
+funzione scorri(op: dimensione, valore: naturale32, quanti: naturale32, largo: booleano) -> naturale32 {
+    se quanti == 0 { ritorna valore; }
+    costante m: naturale32 = maschera_di(largo);
+    costante sgn: naturale32 = bit_segno(largo);
+    variabile v: naturale32 = valore & m;
+    variabile n: naturale32 = quanti;
+    variabile ultimo_alto: booleano = falso;
+    mentre n > 0 {
+        n -= 1;
+        costante alto: booleano = (v & sgn) != 0;
+        ultimo_alto = alto;
+        costante basso: booleano = (v & 1) != 0;
+        scegli op {
+            caso 0 {
+                v = ((v << 1) | (se_uno(alto))) & m;
+                imposta(F_CF, alto);
+            }
+            caso 1 {
+                v = (v >> 1) | (se_uno(basso) * sgn);
+                imposta(F_CF, basso);
+            }
+            caso 2 {
+                costante c: naturale32 = se_uno(ce(F_CF));
+                v = ((v << 1) | c) & m;
+                imposta(F_CF, alto);
+            }
+            caso 3 {
+                costante c: naturale32 = se_uno(ce(F_CF));
+                v = (v >> 1) | (c * sgn);
+                imposta(F_CF, basso);
+            }
+            caso 4, 6 {
+                v = (v << 1) & m;
+                imposta(F_CF, alto);
+            }
+            caso 5 {
+                v = v >> 1;
+                imposta(F_CF, basso);
+            }
+            altrimenti {
+                v = (v >> 1) | (v & sgn);
+                imposta(F_CF, basso);
+            }
+        }
+    }
+    // OF: definito per scorrimento di 1, ma il chip lo calcola sempre cosi'
+    scegli op {
+        caso 0, 2 { imposta(F_OF, ((v & sgn) != 0) != ce(F_CF)); }
+        caso 1, 3 { imposta(F_OF, ((v & sgn) != 0) != ((v & (sgn >> 1)) != 0)); }
+        caso 4, 6 { imposta(F_OF, ((v & sgn) != 0) != ce(F_CF)); }
+        caso 5 { imposta(F_OF, ultimo_alto); }
+        altrimenti { imposta(F_OF, falso); }
+    }
+    se op >= 4 {
+        imposta_zsp(v, largo);
+        imposta(F_AF, falso);
+    }
+    ritorna v;
+}
+
+funzione se_uno(c: booleano) -> naturale32 {
+    se c { ritorna 1; }
+    ritorna 0;
+}
+
+// ---------- operandi generici ----------
+funzione leggi_ea(largo: booleano) -> naturale32 {
+    se largo { ritorna leggi_ea16() come naturale32; }
+    ritorna leggi_ea8() come naturale32;
+}
+
+funzione scrivi_ea(largo: booleano, v: naturale32) {
+    se largo { scrivi_ea16((v & 65535) come naturale16); } altrimenti { scrivi_ea8((v & 255) come byte); }
+}
+
+funzione leggi_rg(largo: booleano, i: dimensione) -> naturale32 {
+    se largo { ritorna r[i] come naturale32; }
+    ritorna reg8(i) come naturale32;
+}
+
+funzione scrivi_rg(largo: booleano, i: dimensione, v: naturale32) {
+    se largo { r[i] = (v & 65535) come naturale16; } altrimenti { imposta_reg8(i, (v & 255) come byte); }
+}
+
+funzione preleva_imm(largo: booleano) -> naturale32 {
+    se largo { ritorna preleva16() come naturale32; }
+    ritorna preleva8() come naturale32;
+}
+
+funzione firma(v: naturale32, largo: booleano) -> intero64 {
+    se largo {
+        se v >= 32768 { ritorna (v come intero64) - 65536; }
+    } altrimenti {
+        se v >= 128 { ritorna (v come intero64) - 256; }
+    }
+    ritorna v come intero64;
+}
+
+funzione salta_rel(d: naturale16) { ip = ip + d; }
+
+// ---------- operazioni di stringa ----------
+funzione passo_stringa(opc: byte, largo: booleano) {
+    costante delta: naturale16 = se_delta(largo);
+    costante sorg_seg: naturale16 = se_ovr();
+    scegli opc {
+        caso 164, 165 {   // MOVS
+            se largo { scrivi16(sg[ES], r[DI], leggi16(sorg_seg, r[SI])); }
+            altrimenti { scrivi8(sg[ES], r[DI], leggi8(sorg_seg, r[SI])); }
+            avanza(SI, delta); avanza(DI, delta);
+        }
+        caso 166, 167 {   // CMPS
+            costante a: naturale32 = lettura(largo, sorg_seg, r[SI]);
+            costante b: naturale32 = lettura(largo, sg[ES], r[DI]);
+            alu(7, a, b, largo);
+            avanza(SI, delta); avanza(DI, delta);
+        }
+        caso 170, 171 {   // STOS
+            se largo { scrivi16(sg[ES], r[DI], r[AX]); }
+            altrimenti { scrivi8(sg[ES], r[DI], reg8(0)); }
+            avanza(DI, delta);
+        }
+        caso 172, 173 {   // LODS
+            scrivi_rg(largo, 0, lettura(largo, sorg_seg, r[SI]));
+            avanza(SI, delta);
+        }
+        altrimenti {      // SCAS
+            costante b: naturale32 = lettura(largo, sg[ES], r[DI]);
+            alu(7, leggi_rg(largo, 0), b, largo);
+            avanza(DI, delta);
+        }
+    }
+}
+
+funzione se_delta(largo: booleano) -> naturale16 {
+    variabile d: naturale16 = 1;
+    se largo { d = 2; }
+    se ce(F_DF) { ritorna 0 - d; }
+    ritorna d;
+}
+
+funzione se_ovr() -> naturale16 {
+    se ovr != 4 { ritorna sg[ovr]; }
+    ritorna sg[DS];
+}
+
+funzione avanza(i: dimensione, d: naturale16) { r[i] = r[i] + d; }
+
+funzione lettura(largo: booleano, s: naturale16, o: naturale16) -> naturale32 {
+    se largo { ritorna leggi16(s, o) come naturale32; }
+    ritorna leggi8(s, o) come naturale32;
+}
+
+// ---------- moltiplicazioni e divisioni (gruppo 3) ----------
+funzione errore_divisione() { interruzione(0); }
+
+funzione gruppo3(largo: booleano) {
+    decodifica_modrm();
+    scegli m_reg {
+        caso 0, 1 {
+            costante a: naturale32 = leggi_ea(largo);
+            costante b: naturale32 = preleva_imm(largo);
+            alu(4, a, b, largo);
+        }
+        caso 2 { scrivi_ea(largo, (~leggi_ea(largo)) & maschera_di(largo)); }
+        caso 3 {
+            costante a: naturale32 = leggi_ea(largo);
+            costante ris: naturale32 = alu(5, 0, a, largo);
+            imposta(F_CF, a != 0);
+            scrivi_ea(largo, ris);
+        }
+        caso 4 {   // MUL
+            costante a: naturale32 = leggi_ea(largo);
+            se largo {
+                costante p: naturale32 = (r[AX] come naturale32) * a;
+                r[AX] = (p & 65535) come naturale16;
+                r[DX] = (p >> 16) come naturale16;
+                imposta(F_CF, (p >> 16) != 0); imposta(F_OF, (p >> 16) != 0);
+            } altrimenti {
+                costante p: naturale32 = (reg8(0) come naturale32) * a;
+                r[AX] = p come naturale16;
+                imposta(F_CF, (p >> 8) != 0); imposta(F_OF, (p >> 8) != 0);
+            }
+            imposta_zsp_mul(largo);
+        }
+        caso 5 {   // IMUL
+            costante a: intero64 = firma(leggi_ea(largo), largo);
+            se largo {
+                costante p: intero64 = firma(r[AX] come naturale32, vero) * a;
+                costante u: naturale32 = (p & 4294967295) come naturale32;
+                r[AX] = (u & 65535) come naturale16;
+                r[DX] = (u >> 16) come naturale16;
+                costante troppo: booleano = p < (0 - 32768) || p > 32767;
+                imposta(F_CF, troppo); imposta(F_OF, troppo);
+            } altrimenti {
+                costante p: intero64 = firma(reg8(0) come naturale32, falso) * a;
+                r[AX] = (p & 65535) come naturale16;
+                costante troppo: booleano = p < (0 - 128) || p > 127;
+                imposta(F_CF, troppo); imposta(F_OF, troppo);
+            }
+            imposta_zsp_mul(largo);
+        }
+        caso 6 {   // DIV
+            costante d: naturale32 = leggi_ea(largo);
+            se largo {
+                costante n: naturale32 = (r[DX] come naturale32) << 16 | (r[AX] come naturale32);
+                se d == 0 || n / d > 65535 { errore_divisione(); ritorna; }
+                r[AX] = (n / d) come naturale16;
+                r[DX] = (n % d) come naturale16;
+            } altrimenti {
+                costante n: naturale32 = r[AX] come naturale32;
+                se d == 0 || n / d > 255 { errore_divisione(); ritorna; }
+                imposta_reg8(0, (n / d) come byte);
+                imposta_reg8(4, (n % d) come byte);
+            }
+        }
+        altrimenti {   // IDIV
+            costante d: intero64 = firma(leggi_ea(largo), largo);
+            se largo {
+                costante n: intero64 = firma32(((r[DX] come naturale32) << 16) | (r[AX] come naturale32));
+                se d == 0 { errore_divisione(); ritorna; }
+                costante q: intero64 = quoziente(n, d);
+                costante re: intero64 = n - q * d;
+                se q > 32767 || q < (0 - 32767) - 1 { errore_divisione(); ritorna; }
+                r[AX] = (q & 65535) come naturale16;
+                r[DX] = (re & 65535) come naturale16;
+            } altrimenti {
+                costante n: intero64 = firma(r[AX] come naturale32, vero);
+                se d == 0 { errore_divisione(); ritorna; }
+                costante q: intero64 = quoziente(n, d);
+                costante re: intero64 = n - q * d;
+                se q > 127 || q < (0 - 127) - 1 { errore_divisione(); ritorna; }
+                imposta_reg8(0, (q & 255) come byte);
+                imposta_reg8(4, (re & 255) come byte);
+            }
+        }
+    }
+}
+
+funzione firma32(v: naturale32) -> intero64 {
+    se v >= 2147483648 { ritorna (v come intero64) - 4294967296; }
+    ritorna v come intero64;
+}
+
+// divisione che tronca verso zero (come l'8086)
+funzione quoziente(n: intero64, d: intero64) -> intero64 {
+    variabile a: intero64 = n;
+    variabile b: intero64 = d;
+    variabile neg: booleano = falso;
+    se a < 0 { a = 0 - a; neg = !neg; }
+    se b < 0 { b = 0 - b; neg = !neg; }
+    costante q: intero64 = a / b;
+    se neg { ritorna 0 - q; }
+    ritorna q;
+}
+
+// dopo MUL/IMUL i flag ZF, SF, PF, AF sono indefiniti: li lasciamo come sono
+funzione imposta_zsp_mul(largo: booleano) { }
+
+// ---------- BCD ----------
+funzione regola_decimale(opc: byte) {
+    variabile al: naturale32 = reg8(0) come naturale32;
+    costante vecchio_al: naturale32 = al;
+    costante vecchio_cf: booleano = ce(F_CF);
+    variabile limite: naturale32 = 153;
+    se ce(F_AF) { limite = 159; }
+    imposta(F_CF, falso);
+    scegli opc {
+        caso 39 {   // DAA
+            se (al & 15) > 9 || ce(F_AF) { al = al + 6; imposta(F_AF, vero); } altrimenti { imposta(F_AF, falso); }
+            se vecchio_al > limite || vecchio_cf { al = al + 96; imposta(F_CF, vero); }
+        }
+        altrimenti {   // DAS
+            se (al & 15) > 9 || ce(F_AF) { al = al - 6; imposta(F_AF, vero); } altrimenti { imposta(F_AF, falso); }
+            se vecchio_al > limite || vecchio_cf { al = al - 96; imposta(F_CF, vero); }
+        }
+    }
+    imposta_reg8(0, (al & 255) come byte);
+    imposta_zsp(al & 255, falso);
+}
+
+funzione regola_ascii(sottrai: booleano) {
+    costante al: naturale32 = reg8(0) come naturale32;
+    se (al & 15) > 9 || ce(F_AF) {
+        se sottrai {
+            imposta_reg8(0, (reg8(0) - 6) come byte); imposta_reg8(4, (reg8(4) - 1) come byte);
+        } altrimenti {
+            imposta_reg8(0, (reg8(0) + 6) come byte); imposta_reg8(4, (reg8(4) + 1) come byte);
+        }
+        imposta(F_AF, vero); imposta(F_CF, vero);
+    } altrimenti {
+        imposta(F_AF, falso); imposta(F_CF, falso);
+    }
+    imposta_reg8(0, (reg8(0) & 15) come byte);
+}
+
+// ---------- gruppo 5 (FF) ----------
+funzione gruppo5() {
+    decodifica_modrm();
+    scegli m_reg {
+        caso 0 { scrivi_ea16(incdec(leggi_ea16() come naturale32, falso, vero) come naturale16); }
+        caso 1 { scrivi_ea16(incdec(leggi_ea16() come naturale32, vero, vero) come naturale16); }
+        caso 2 {
+            costante dest: naturale16 = leggi_ea16();
+            spingi16(ip); ip = dest;
+        }
+        caso 3 {
+            costante dest: naturale16 = leggi16(m_seg, m_off);
+            costante nuovo_cs: naturale16 = leggi16(m_seg, m_off + 2);
+            spingi16(sg[CS]); spingi16(ip);
+            ip = dest; sg[CS] = nuovo_cs;
+        }
+        caso 4 { ip = leggi_ea16(); }
+        caso 5 {
+            costante dest: naturale16 = leggi16(m_seg, m_off);
+            costante nuovo_cs: naturale16 = leggi16(m_seg, m_off + 2);
+            ip = dest; sg[CS] = nuovo_cs;
+        }
+        altrimenti {
+            se m_md == 3 && m_rm == SP { spingi16(r[SP] - 2); } altrimenti { spingi16(leggi_ea16()); }
+        }
+    }
+}
+
+funzione porta_in(porta: naturale16, largo: booleano) -> naturale32 {
+    ritorna maschera_di(largo);
+}
+
+funzione porta_out(porta: naturale16, largo: booleano, v: naturale32) { }
+
+// ---------- un'istruzione ----------
+funzione passo() {
+    ovr = 4;
+    ripeti = 0;
+    variabile opc: byte = preleva8();
+    variabile ancora: booleano = vero;
+    mentre ancora {
+        ancora = falso;
+        scegli opc {
+            caso 38 { ovr = ES; ancora = vero; }
+            caso 46 { ovr = CS; ancora = vero; }
+            caso 54 { ovr = SS; ancora = vero; }
+            caso 62 { ovr = DS; ancora = vero; }
+            caso 240, 241 { ancora = vero; }
+            caso 242 { ripeti = 1; ancora = vero; }
+            caso 243 { ripeti = 2; ancora = vero; }
+            altrimenti { }
+        }
+        se ancora { opc = preleva8(); }
+    }
+    ultimo_codice = opc;
+    costante basso: byte = opc & 7;
+    costante largo: booleano = (opc & 1) == 1;
+
+    se opc < 64 && basso < 6 {
+        costante op: byte = (opc >> 3) & 7;
+        se basso < 4 {
+            decodifica_modrm();
+            costante e_largo: booleano = (basso & 1) == 1;
+            se basso < 2 {
+                costante ris: naturale32 = alu(op come dimensione, leggi_ea(e_largo), leggi_rg(e_largo, m_reg), e_largo);
+                se op != 7 { scrivi_ea(e_largo, ris); }
+            } altrimenti {
+                costante ris: naturale32 = alu(op come dimensione, leggi_rg(e_largo, m_reg), leggi_ea(e_largo), e_largo);
+                se op != 7 { scrivi_rg(e_largo, m_reg, ris); }
+            }
+        } altrimenti {
+            costante e_largo: booleano = basso == 5;
+            costante ris: naturale32 = alu(op come dimensione, leggi_rg(e_largo, 0), preleva_imm(e_largo), e_largo);
+            se op != 7 { scrivi_rg(e_largo, 0, ris); }
+        }
+        ritorna;
+    }
+    scegli opc {
+        caso 6, 14, 22, 30 { spingi16(sg[(opc >> 3) come dimensione]); }
+        caso 7, 23, 31 { sg[(opc >> 3) come dimensione] = estrai16(); }
+        caso 15 { sg[CS] = estrai16(); }
+        caso 39, 47 { regola_decimale(opc); }
+        caso 55 { regola_ascii(falso); }
+        caso 63 { regola_ascii(vero); }
+        caso 64, 65, 66, 67, 68, 69, 70, 71 {
+            costante i: dimensione = (opc & 7) come dimensione;
+            r[i] = incdec(r[i] come naturale32, falso, vero) come naturale16;
+        }
+        caso 72, 73, 74, 75, 76, 77, 78, 79 {
+            costante i: dimensione = (opc & 7) come dimensione;
+            r[i] = incdec(r[i] come naturale32, vero, vero) come naturale16;
+        }
+        caso 80, 81, 82, 83, 84, 85, 86, 87 {
+            costante i: dimensione = (opc & 7) come dimensione;
+            // PUSH SP sull'8086 spinge il valore gia' decrementato
+            se i == SP { spingi16(r[SP] - 2); } altrimenti { spingi16(r[i]); }
+        }
+        caso 88, 89, 90, 91, 92, 93, 94, 95 { r[(opc & 7) come dimensione] = estrai16(); }
+        caso 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+             112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127 {
+            costante d: naturale16 = estendi8(preleva8());
+            se condizione(opc & 15) { salta_rel(d); }
+        }
+        caso 128, 129, 130, 131 {
+            decodifica_modrm();
+            costante e_largo: booleano = (opc & 1) == 1;
+            variabile imm: naturale32 = 0;
+            se opc == 129 { imm = preleva16() come naturale32; }
+            altrimenti se opc == 131 { imm = estendi8(preleva8()) come naturale32; }
+            altrimenti { imm = preleva8() come naturale32; }
+            costante ris: naturale32 = alu(m_reg, leggi_ea(e_largo), imm & maschera_di(e_largo), e_largo);
+            se m_reg != 7 { scrivi_ea(e_largo, ris); }
+        }
+        caso 132, 133 {
+            decodifica_modrm();
+            alu(4, leggi_ea(largo), leggi_rg(largo, m_reg), largo);
+        }
+        caso 134, 135 {
+            decodifica_modrm();
+            costante a: naturale32 = leggi_ea(largo);
+            scrivi_ea(largo, leggi_rg(largo, m_reg));
+            scrivi_rg(largo, m_reg, a);
+        }
+        caso 136, 137 { decodifica_modrm(); scrivi_ea(largo, leggi_rg(largo, m_reg)); }
+        caso 138, 139 { decodifica_modrm(); scrivi_rg(largo, m_reg, leggi_ea(largo)); }
+        caso 140 { decodifica_modrm(); scrivi_ea16(sg[m_reg & 3]); }
+        caso 141 { decodifica_modrm(); r[m_reg] = m_off; }
+        caso 142 { decodifica_modrm(); sg[m_reg & 3] = leggi_ea16(); }
+        caso 143 { decodifica_modrm(); costante v: naturale16 = estrai16(); scrivi_ea16(v); }
+        caso 144 { }
+        caso 145, 146, 147, 148, 149, 150, 151 {
+            costante i: dimensione = (opc & 7) come dimensione;
+            costante t: naturale16 = r[AX];
+            r[AX] = r[i]; r[i] = t;
+        }
+        caso 152 { se (reg8(0) & 128) != 0 { imposta_reg8(4, 255); } altrimenti { imposta_reg8(4, 0); } }
+        caso 153 { se (r[AX] & 32768) != 0 { r[DX] = 65535; } altrimenti { r[DX] = 0; } }
+        caso 154 {
+            costante nuovo_ip: naturale16 = preleva16();
+            costante nuovo_cs: naturale16 = preleva16();
+            spingi16(sg[CS]); spingi16(ip);
+            ip = nuovo_ip; sg[CS] = nuovo_cs;
+        }
+        caso 155 { }
+        caso 156 { spingi16((flag & 4095) | 61440); }
+        caso 157 { flag = (estrai16() & 4055) | 2; }
+        caso 158 { flag = (flag & 65280) | (reg8(4) come naturale16 & 213) | 2; }
+        caso 159 { imposta_reg8(4, ((flag & 255) | 2) come byte); }
+        caso 160, 161 {
+            costante o: naturale16 = preleva16();
+            scrivi_rg(largo, 0, lettura(largo, se_ovr(), o));
+        }
+        caso 162, 163 {
+            costante o: naturale16 = preleva16();
+            se largo { scrivi16(se_ovr(), o, r[AX]); } altrimenti { scrivi8(se_ovr(), o, reg8(0)); }
+        }
+        caso 164, 165, 166, 167, 170, 171, 172, 173, 174, 175 {
+            se ripeti == 0 {
+                passo_stringa(opc, largo);
+            } altrimenti {
+                costante conf: booleano = opc == 166 || opc == 167 || opc == 174 || opc == 175;
+                mentre r[CX] != 0 {
+                    passo_stringa(opc, largo);
+                    r[CX] = r[CX] - 1;
+                    se conf {
+                        se ripeti == 2 && !ce(F_ZF) { ritorna; }
+                        se ripeti == 1 && ce(F_ZF) { ritorna; }
+                    }
+                }
+            }
+        }
+        caso 168 { alu(4, leggi_rg(falso, 0), preleva8() come naturale32, falso); }
+        caso 169 { alu(4, r[AX] come naturale32, preleva16() come naturale32, vero); }
+        caso 176, 177, 178, 179, 180, 181, 182, 183 { imposta_reg8((opc & 7) come dimensione, preleva8()); }
+        caso 184, 185, 186, 187, 188, 189, 190, 191 { r[(opc & 7) come dimensione] = preleva16(); }
+        caso 194, 192 { costante n: naturale16 = preleva16(); ip = estrai16(); r[SP] = r[SP] + n; }
+        caso 195, 193 { ip = estrai16(); }
+        caso 196, 197 {
+            decodifica_modrm();
+            costante lo: naturale16 = leggi16(m_seg, m_off);
+            costante hi: naturale16 = leggi16(m_seg, m_off + 2);
+            r[m_reg] = lo;
+            se opc == 196 { sg[ES] = hi; } altrimenti { sg[DS] = hi; }
+        }
+        caso 198, 199 {
+            decodifica_modrm();
+            scrivi_ea(largo, preleva_imm(largo));
+        }
+        caso 202, 200 { costante n: naturale16 = preleva16(); ip = estrai16(); sg[CS] = estrai16(); r[SP] = r[SP] + n; }
+        caso 203, 201 { ip = estrai16(); sg[CS] = estrai16(); }
+        caso 204 { interruzione(3); }
+        caso 205 { int_sospesa = preleva8() come intero; }
+        caso 206 { se ce(F_OF) { interruzione(4); } }
+        caso 207 { ip = estrai16(); sg[CS] = estrai16(); flag = (estrai16() & 4055) | 2; }
+        caso 208, 209, 210, 211 {
+            decodifica_modrm();
+            variabile n: naturale32 = 1;
+            se opc >= 210 { n = reg8(1) come naturale32; }
+            scrivi_ea(largo, scorri(m_reg, leggi_ea(largo), n, largo));
+        }
+        caso 212 {
+            costante base: byte = preleva8();
+            se base == 0 {
+                imposta_zsp(0, falso); imposta(F_CF, falso); imposta(F_OF, falso); imposta(F_AF, falso);
+                interruzione(0); ritorna;
+            }
+            costante al: byte = reg8(0);
+            imposta_reg8(4, al / base);
+            imposta_reg8(0, al % base);
+            imposta_zsp(reg8(0) come naturale32, falso);
+            imposta(F_CF, falso); imposta(F_OF, falso); imposta(F_AF, falso);
+        }
+        caso 213 {
+            costante base: byte = preleva8();
+            costante v: naturale32 = ((reg8(4) come naturale32) * (base come naturale32) + (reg8(0) come naturale32)) & 255;
+            imposta_reg8(0, v come byte); imposta_reg8(4, 0);
+            imposta_zsp(v, falso);
+            imposta(F_CF, falso); imposta(F_OF, falso); imposta(F_AF, falso);
+        }
+        caso 214 { se ce(F_CF) { imposta_reg8(0, 255); } altrimenti { imposta_reg8(0, 0); } }
+        caso 215 { imposta_reg8(0, leggi8(se_ovr(), r[BX] + (reg8(0) come naturale16))); }
+        caso 216, 217, 218, 219, 220, 221, 222, 223 { decodifica_modrm(); }
+        caso 224, 225, 226, 227 {
+            costante d: naturale16 = estendi8(preleva8());
+            variabile salta: booleano = falso;
+            se opc == 227 {
+                salta = r[CX] == 0;
+            } altrimenti {
+                r[CX] = r[CX] - 1;
+                salta = r[CX] != 0;
+                se opc == 224 && ce(F_ZF) { salta = falso; }
+                se opc == 225 && !ce(F_ZF) { salta = falso; }
+            }
+            se salta { salta_rel(d); }
+        }
+        caso 228, 229 { costante p: naturale16 = preleva8() come naturale16; scrivi_rg(largo, 0, porta_in(p, largo)); }
+        caso 230, 231 { costante p: naturale16 = preleva8() come naturale16; porta_out(p, largo, leggi_rg(largo, 0)); }
+        caso 232 { costante d: naturale16 = preleva16(); spingi16(ip); salta_rel(d); }
+        caso 233 { costante d: naturale16 = preleva16(); salta_rel(d); }
+        caso 234 { costante nuovo_ip: naturale16 = preleva16(); costante nuovo_cs: naturale16 = preleva16(); ip = nuovo_ip; sg[CS] = nuovo_cs; }
+        caso 235 { salta_rel(estendi8(preleva8())); }
+        caso 236, 237 { scrivi_rg(largo, 0, porta_in(r[DX], largo)); }
+        caso 238, 239 { porta_out(r[DX], largo, leggi_rg(largo, 0)); }
+        caso 244 { fermo = vero; }
+        caso 245 { imposta(F_CF, !ce(F_CF)); }
+        caso 246, 247 { gruppo3(largo); }
+        caso 248 { imposta(F_CF, falso); }
+        caso 249 { imposta(F_CF, vero); }
+        caso 250 { imposta(F_IF, falso); }
+        caso 251 { imposta(F_IF, vero); }
+        caso 252 { imposta(F_DF, falso); }
+        caso 253 { imposta(F_DF, vero); }
+        caso 254 {
+            decodifica_modrm();
+            costante dec: booleano = m_reg == 1;
+            scrivi_ea8(incdec(leggi_ea8() come naturale32, dec, falso) come byte);
+        }
+        caso 255 { gruppo5(); }
+        altrimenti { tratta_errore = 1; }
+    }
+}

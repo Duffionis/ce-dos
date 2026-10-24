@@ -1,0 +1,77 @@
+usa "cpu86.ce";
+usa "@risultato.ce";
+
+
+funzione parola(dati: [byte], pos: &dimensione) -> naturale32 {
+    costante p: dimensione = pos;
+    pos += 4;
+    ritorna (dati[p] come naturale32) | ((dati[p + 1] come naturale32) << 8)
+          | ((dati[p + 2] come naturale32) << 16) | ((dati[p + 3] come naturale32) << 24);
+}
+
+funzione carica_regs(dati: [byte], pos: &dimensione) {
+    r[AX] = parola(dati, pos) come naturale16; r[BX] = parola(dati, pos) come naturale16;
+    r[CX] = parola(dati, pos) come naturale16; r[DX] = parola(dati, pos) come naturale16;
+    sg[CS] = parola(dati, pos) come naturale16; sg[SS] = parola(dati, pos) come naturale16;
+    sg[DS] = parola(dati, pos) come naturale16; sg[ES] = parola(dati, pos) come naturale16;
+    r[SP] = parola(dati, pos) come naturale16; r[BP] = parola(dati, pos) come naturale16;
+    r[SI] = parola(dati, pos) come naturale16; r[DI] = parola(dati, pos) come naturale16;
+    ip = parola(dati, pos) come naturale16; flag = parola(dati, pos) come naturale16;
+}
+
+funzione principale() -> intero {
+    se numero_argomenti() < 2 { stampa("uso: prova86 file.bin"); ritorna 2; }
+    costante lett: Risultato<[byte], testo> = leggi_file(argomento(1));
+    se !lett.riuscito { stampa("errore: ", lett.errore); ritorna 2; }
+    costante dati: [byte] = lett.valore;
+    variabile pos: dimensione = 0;
+    costante totale: naturale32 = parola(dati, pos);
+    costante maschera: naturale32 = parola(dati, pos);
+    variabile falliti: naturale32 = 0;
+    variabile k: naturale32 = 0;
+    mentre k < totale {
+        carica_regs(dati, pos);
+        costante n: naturale32 = parola(dati, pos);
+        variabile j: naturale32 = 0;
+        variabile sporchi: [naturale32; 140000];
+        variabile ns: dimensione = 0;
+        mentre j < n {
+            costante a: naturale32 = parola(dati, pos);
+            memoria[a] = parola(dati, pos) come byte;
+            sporchi[ns] = a; ns += 1;
+            j += 1;
+        }
+        fermo = falso; tratta_errore = 0;
+        passo();
+        servi_int();
+        // atteso
+        variabile atteso: [naturale16; 14];
+        variabile q: dimensione = 0;
+        mentre q < 14 { atteso[q] = parola(dati, pos) come naturale16; q += 1; }
+        variabile male: booleano = falso;
+        costante ora: [naturale16; 14] = [r[AX], r[BX], r[CX], r[DX], sg[CS], sg[SS], sg[DS], sg[ES],
+                                          r[SP], r[BP], r[SI], r[DI], ip, 0];
+        q = 0;
+        mentre q < 13 { se ora[q] != atteso[q] { male = vero; } q += 1; }
+        se ((flag ^ atteso[13]) & (maschera come naturale16) & 4053) != 0 { male = vero; }
+        costante m: naturale32 = parola(dati, pos);
+        j = 0;
+        mentre j < m {
+            costante a: naturale32 = parola(dati, pos);
+            costante v: naturale32 = parola(dati, pos);
+            se memoria[a] != (v come byte) { male = vero; }
+            sporchi[ns] = a; ns += 1;
+            j += 1;
+        }
+        j = 0;
+        mentre j < (ns come naturale32) { memoria[sporchi[j]] = 0; j += 1; }
+        se male {
+            falliti += 1;
+            se falliti <= 3 { stampa("FALLITA prova ", k, " opcode ", ultimo_codice, " flag ", flag, " atteso ", atteso[13]); }
+        }
+        k += 1;
+    }
+    stampa(totale - falliti, "/", totale);
+    se falliti > 0 { ritorna 1; }
+    ritorna 0;
+}
